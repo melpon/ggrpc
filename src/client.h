@@ -1,6 +1,9 @@
 #ifndef GGRPC_CLIENT_H_INCLUDED
 #define GGRPC_CLIENT_H_INCLUDED
 
+// グレースフルシャットダウンやマルチスレッドに対応した、
+// 安全に利用できる gRPC クライアント
+
 #include <deque>
 #include <functional>
 #include <iostream>
@@ -17,6 +20,12 @@
 #include <spdlog/spdlog.h>
 
 namespace ggrpc {
+
+enum ClientReaderWriterError {
+  CONNECT,
+  READ,
+  WRITE,
+}
 
 template <class W, class R>
 class ClientReaderWriterImpl {
@@ -62,20 +71,26 @@ class ClientReaderWriterImpl {
   bool shutdown_ = false;
   std::mutex mutex_;
 
-  std::function<void(R)> read_;
-  std::function<void(grpc::Status)> done_;
+  std::function<void(R)> on_read_;
+  std::function<void(grpc::Status)> on_done_;
+  std::function<void(ClientReaderWriterError)> on_error_;
+
+  bool in_error_ = false;
 
  public:
   ClientReaderWriterImpl(
       std::function<std::unique_ptr<grpc::ClientAsyncReaderWriter<W, R>>(
-          grpc::ClientContext*, void*)>
-          async_connect,
-      std::function<void(R)> read, std::function<void(grpc::Status)> done)
+          grpc::ClientContext*,
+          void*)> async_connect,
+      std::function<void(R)> on_read,
+      std::function<void(grpc::Status)> on_done,
+      std::function<void(ClientReaderWriterError)> on_error)
       : connector_thunk_(this),
         reader_thunk_(this),
         writer_thunk_(this),
-        read_(std::move(read)),
-        done_(std::move(done)) {
+        on_read_(std::move(on_read)),
+        on_done_(std::move(on_done)),
+        on_error_(std::move(on_error)) {
     std::lock_guard<std::mutex> guard(mutex_);
     streamer_ = async_connect(&context_, &connector_thunk_);
   }
@@ -149,15 +164,40 @@ class ClientReaderWriterImpl {
   }
 
  private:
+  void OnError(std::unique_lock<std::mutex>& lock,
+               ClientReaderWriterError error) {
+    in_error_ = true;
+    lock.unlock();
+    try {
+      on_error_(error);
+      lock.lock();
+      in_error_ = false;
+    } catch (...) {
+      lock.lock();
+      in_error_ = false;
+    }
+  }
+
   void ProceedToConnect(bool ok) {
     std::unique_ptr<ClientReaderWriterImpl> p;
-    std::lock_guard<std::mutex> guard(mutex_);
+    std::unique_lock<std::mutex> lock(mutex_);
     SPDLOG_TRACE("ProceedToConnect: {}", (void*)this);
+
+    if (shutdown_) {
+      read_status_ = ReadStatus::FINISHED;
+      write_status_ = WriteStatus::FINISHED;
+      if (Deletable()) {
+        p.reset(this);
+      }
+      return;
+    }
 
     if (!ok) {
       SPDLOG_ERROR("connection error");
+
       read_status_ = ReadStatus::FINISHED;
       write_status_ = WriteStatus::FINISHED;
+      OnError(lock, ClientReaderWriterError::CONNECT);
       if (Deletable()) {
         p.reset(this);
       }
@@ -191,7 +231,16 @@ class ClientReaderWriterImpl {
         read_status_ = ReadStatus::FINISHING;
       } else if (read_status_ == ReadStatus::FINISHING) {
         SPDLOG_ERROR("reading or finishing error");
+        // 書き込み中ならキャンセルする
+        if (write_status_ == WriteStatus::CONNECTING ||
+            write_status_ == WriteStatus::WRITING ||
+            write_status_ == WriteStatus::FINISHING) {
+          context_.TryCancel();
+        } else {
+          write_status_ == WriteStatus::FINISHED
+        }
         read_status_ = ReadStatus::FINISHED;
+        OnError(lock, ClientReaderWriterError::READ);
         if (Deletable()) {
           p.reset(this);
         }
@@ -207,7 +256,7 @@ class ClientReaderWriterImpl {
       // 再度ロックした時に状態が変わってる可能性があるので注意すること。
       lock.unlock();
       try {
-        read_(std::move(response_));
+        on_read_(std::move(response_));
         lock.lock();
       } catch (...) {
         lock.lock();
@@ -233,7 +282,7 @@ class ClientReaderWriterImpl {
       // 再度ロックした時に状態が変わってる可能性があるので注意すること。
       lock.unlock();
       try {
-        done_(std::move(grpc_status_));
+        on_done_(std::move(grpc_status_));
         lock.lock();
       } catch (...) {
         lock.lock();
@@ -268,8 +317,16 @@ class ClientReaderWriterImpl {
     }
 
     if (!ok) {
-      context_.TryCancel();
+      // 読み込み中ならキャンセルする
+      if (read_status_ == ReadStatus::CONNECTING ||
+          read_status_ == ReadStatus::READING ||
+          read_status_ == ReadStatus::FINISHING) {
+        context_.TryCancel();
+      } else {
+        read_status_ = ReadStatus::FINISHED;
+      }
       write_status_ = WriteStatus::FINISHED;
+      OnError(lock, ClientReaderWriterError::WRITE);
       if (Deletable()) {
         p.reset(this);
       }
@@ -309,7 +366,7 @@ class ClientReaderWriterImpl {
   }
 
   bool Deletable() const {
-    return shutdown_ && read_status_ == ReadStatus::FINISHED &&
+    return shutdown_ && !in_error_ && read_status_ == ReadStatus::FINISHED &&
            write_status_ == WriteStatus::FINISHED;
   }
 };
@@ -337,6 +394,10 @@ class ClientReaderWriter {
   void WritesDone() { p_->WritesDone(); }
 };
 
+enum ClientResponseReaderError {
+  FINISH,
+};
+
 template <class R>
 class ClientResponseReaderImpl {
   struct ReaderThunk : Handler {
@@ -358,15 +419,18 @@ class ClientResponseReaderImpl {
   bool shutdown_ = false;
   std::mutex mutex_;
 
-  std::function<void(R, grpc::Status)> done_;
+  std::function<void(R, grpc::Status)> on_done_;
+  std::function<void(ClientResponseReaderError)> on_error_;
 
  public:
   ClientResponseReaderImpl(
       std::function<std::unique_ptr<grpc::ClientAsyncResponseReader<R>>(
-          grpc::ClientContext*)>
-          async_request,
-      std::function<void(R, grpc::Status)> done)
-      : reader_thunk_(this), done_(std::move(done)) {
+          grpc::ClientContext*)> async_request,
+      std::function<void(R, grpc::Status)> on_done,
+      std::function<void(ClientResponseReaderError)> on_error)
+      : reader_thunk_(this),
+        on_done_(std::move(on_done)),
+        on_error_(std::move(on_error)) {
     std::lock_guard<std::mutex> guard(mutex_);
     reader_ = async_request(&context_);
     reader_->Finish(&response_, &grpc_status_, &reader_thunk_);
@@ -407,18 +471,23 @@ class ClientResponseReaderImpl {
 
     if (!ok) {
       SPDLOG_ERROR("finishing error");
+      lock.unlock();
+      try {
+        on_error_(ClientResponseReaderError::FINISH);
+        lock.lock();
+      } catch (...) {
+        lock.lock();
+      }
+
       p.reset(this);
       return;
     }
 
     // 結果が取得できた
 
-    // 普通にコールバックするとデッドロックの可能性があるので
-    // unlock してからコールバックする。
-    // 再度ロックした時に状態が変わってる可能性があるので注意すること。
     lock.unlock();
     try {
-      done_(std::move(response_), std::move(grpc_status_));
+      on_done_(std::move(response_), std::move(grpc_status_));
       lock.lock();
     } catch (...) {
       lock.lock();
@@ -572,9 +641,12 @@ class ClientManager {
   template <class W, class R>
   std::unique_ptr<WritableClient<W>> CreateReaderWriterClient(
       std::function<std::unique_ptr<grpc::ClientAsyncReaderWriter<W, R>>(
-          grpc::ClientContext*, grpc::CompletionQueue*, void*)>
-          async_connect,
-      std::function<void(R)> read, std::function<void(grpc::Status)> done) {
+          grpc::ClientContext*,
+          grpc::CompletionQueue*,
+          void*)> async_connect,
+      std::function<void(R)> on_read,
+      std::function<void(grpc::Status)> on_done,
+      std::function<void(ClientReaderWriterError)> on_error) {
     std::lock_guard<std::mutex> guard(mutex_);
 
     auto client_id = next_client_id_++;
@@ -587,7 +659,8 @@ class ClientManager {
     };
 
     std::unique_ptr<WritableHolder> holder(new ReaderWriterHolderImpl<W, R>(
-        std::move(async_connect2), std::move(read), std::move(done)));
+        std::move(async_connect2), std::move(on_read), std::move(on_done),
+        std::move(on_error)));
     writable_clients_.insert(std::make_pair(client_id, std::move(holder)));
     return std::unique_ptr<WritableClient<W>>(
         new WritableClient<W>(client_id, this));
@@ -596,9 +669,12 @@ class ClientManager {
   template <class W, class R>
   std::unique_ptr<Client> CreateClient(
       std::function<std::unique_ptr<grpc::ClientAsyncResponseReader<R>>(
-          grpc::ClientContext*, const W&, grpc::CompletionQueue*)>
-          async_request,
-      const W& request, std::function<void(R, grpc::Status)> done) {
+          grpc::ClientContext*,
+          const W&,
+          grpc::CompletionQueue*)> async_request,
+      const W& request,
+      std::function<void(R, grpc::Status)> on_done,
+      std::function<void(ClientResponseReaderError)> on_error) {
     std::lock_guard<std::mutex> guard(mutex_);
 
     auto client_id = next_client_id_++;
@@ -611,7 +687,7 @@ class ClientManager {
     };
 
     std::unique_ptr<Holder> holder(new ResponseReaderHolderImpl<R>(
-        std::move(async_request2), std::move(done)));
+        std::move(async_request2), std::move(on_done), std::move(on_error)));
     clients_.insert(std::make_pair(client_id, std::move(holder)));
     return std::unique_ptr<Client>(new Client(client_id, this));
   }
