@@ -6,7 +6,7 @@ syntax = "proto3";
 // option objc_class_prefix = "HLW";
 option cc_enable_arenas = true;
 
-package ggrpc;
+package ggrpctest;
 
 service Test {
   rpc Bidi(stream BidiRequest) returns (stream BidiResponse) {}
