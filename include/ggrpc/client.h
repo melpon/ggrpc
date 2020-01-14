@@ -19,13 +19,15 @@
 // spdlog
 #include <spdlog/spdlog.h>
 
+#include "handler.h"
+
 namespace ggrpc {
 
 enum ClientReaderWriterError {
   CONNECT,
   READ,
   WRITE,
-}
+};
 
 template <class W, class R>
 class ClientReaderWriterImpl {
@@ -237,7 +239,7 @@ class ClientReaderWriterImpl {
             write_status_ == WriteStatus::FINISHING) {
           context_.TryCancel();
         } else {
-          write_status_ == WriteStatus::FINISHED
+          write_status_ = WriteStatus::FINISHED;
         }
         read_status_ = ReadStatus::FINISHED;
         OnError(lock, ClientReaderWriterError::READ);
@@ -305,7 +307,7 @@ class ClientReaderWriterImpl {
 
   void ProceedToWrite(bool ok) {
     std::unique_ptr<ClientReaderWriterImpl> p;
-    std::lock_guard<std::mutex> guard(mutex_);
+    std::unique_lock<std::mutex> lock(mutex_);
     SPDLOG_TRACE("ProceedToWrite: {}", (void*)this);
 
     if (shutdown_) {

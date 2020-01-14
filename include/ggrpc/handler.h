@@ -1,5 +1,5 @@
-#ifndef GGRPC_GRPC_CLIENT
-#define GGRPC_GRPC_CLIENT
+#ifndef GGRPC_HANDLER_H_INCLUDED
+#define GGRPC_HANDLER_H_INCLUDED
 
 namespace ggrpc {
 
@@ -8,3 +8,5 @@ struct Handler {
 };
 
 }  // namespace ggrpc
+
+#endif  // GGRPC_HANDLER_H_INCLUDED

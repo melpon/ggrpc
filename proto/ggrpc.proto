@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+// option java_multiple_files = true;
+// option java_package = "io.grpc.examples.helloworld";
+// option java_outer_classname = "HelloWorldProto";
+// option objc_class_prefix = "HLW";
+option cc_enable_arenas = true;
+
+package ggrpc;
+
+service Test {
+  rpc Bidi(stream BidiRequest) returns (stream BidiResponse) {}
+}
+
+message BidiRequest {
+  int32 value = 1;
+}
+
+message BidiResponse {
+  int32 value = 1;
+}
