@@ -20,5 +20,5 @@ pushd _build/ggrpc
     -DCMAKE_BUILD_TYPE=Release \
     "$@"
   make ggrpc_test
-  make test
+  ./ggrpc_test
 popd

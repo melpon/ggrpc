@@ -36,7 +36,7 @@ enable_testing()
 add_executable(ggrpc_test test/ggrpc_test.cpp ${GGRPC_PROTO})
 add_test(NAME ggrpc_test COMMAND $<TARGET_FILE:ggrpc_test>)
 target_compile_definitions(ggrpc_test PRIVATE SPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_TRACE)
-set_target_properties(ggrpc_test PROPERTIES CXX_STANDARD 14 C_STANDARD 99)
+set_target_properties(ggrpc_test PROPERTIES CXX_STANDARD 17 C_STANDARD 99)
 target_include_directories(ggrpc_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(ggrpc_test PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/proto")
 target_link_libraries(ggrpc_test
