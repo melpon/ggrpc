@@ -12,6 +12,7 @@
 #include <thread>
 
 // gRPC
+#include <grpcpp/alarm.h>
 #include <grpcpp/grpcpp.h>
 #include <grpcpp/support/async_stream.h>
 #include <grpcpp/support/async_unary_call.h>
@@ -519,6 +520,110 @@ class ClientResponseReader {
   void Shutdown() { p_->Shutdown(); }
 };
 
+class ClientAlarmImpl {
+  std::mutex mutex_;
+
+  struct NotifierThunk : Handler {
+    ClientAlarmImpl* p;
+    NotifierThunk(ClientAlarmImpl* p) : p(p) {}
+    void Proceed(bool ok) override { p->ProceedToNotify(ok); }
+  };
+  NotifierThunk notifier_thunk_;
+  friend class NotifierThunk;
+
+  grpc::CompletionQueue* cq_;
+  grpc::Alarm alarm_;
+  std::function<void()> on_done_;
+  bool shutdown_ = false;
+  bool notified_ = false;
+
+ public:
+  ClientAlarmImpl(grpc::CompletionQueue* cq, std::chrono::milliseconds ms,
+                  std::function<void()> f)
+      : notifier_thunk_(this), cq_(cq) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    on_done_ = std::move(f);
+    gpr_timespec ts;
+    ts.clock_type = GPR_TIMESPAN;
+    ts.tv_sec = ms.count() / 1000;
+    ts.tv_nsec = (ms.count() % 1000) * 1000000;
+    alarm_.Set(cq_, ts, &notifier_thunk_);
+  }
+  ~ClientAlarmImpl() { SPDLOG_DEBUG("deleted: {}", (void*)this); }
+
+  // コピー、ムーブ禁止
+  ClientAlarmImpl(const ClientAlarmImpl&) = delete;
+  ClientAlarmImpl(ClientAlarmImpl&&) = delete;
+  ClientAlarmImpl& operator=(const ClientAlarmImpl&) = delete;
+  ClientAlarmImpl& operator=(ClientAlarmImpl&&) = delete;
+
+  void Shutdown() {
+    std::unique_ptr<ClientAlarmImpl> p;
+
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (shutdown_) {
+      return;
+    }
+    alarm_.Cancel();
+    shutdown_ = true;
+    if (notified_ && shutdown_) {
+      p.reset(this);
+    }
+  }
+
+ private:
+  void ProceedToNotify(bool ok) {
+    std::unique_ptr<ClientAlarmImpl> p;
+
+    std::unique_lock<std::mutex> lock(mutex_);
+    SPDLOG_TRACE("ProceedToNotify: this={}, ok={}", (void*)this, ok);
+
+    if (!ok || shutdown_) {
+      notified_ = true;
+
+      // キャンセルされた
+      if (shutdown_ && notified_) {
+        p.reset(this);
+      }
+      return;
+    }
+
+    // ロック中に on_done_ を取得しておく
+    auto f = std::move(on_done_);
+    lock.unlock();
+    try {
+      f();
+      lock.lock();
+    } catch (...) {
+      lock.lock();
+    }
+
+    notified_ = true;
+
+    // コールバックが終わって Shutdown が呼ばれてたら終了
+    if (shutdown_ && notified_) {
+      p.reset(this);
+    }
+  }
+};
+
+class ClientAlarm {
+  ClientAlarmImpl* p_;
+
+ public:
+  template <class... Args>
+  ClientAlarm(Args... args)
+      : p_(new ClientAlarmImpl(std::forward<Args>(args)...)) {}
+  ~ClientAlarm() { Shutdown(); }
+
+  ClientAlarm(const ClientAlarm&) = delete;
+  ClientAlarm(ClientAlarm&&) = delete;
+  ClientAlarm& operator=(const ClientAlarm&) = delete;
+  ClientAlarm& operator=(ClientAlarm&&) = delete;
+
+  void Shutdown() { p_->Shutdown(); }
+};
+
 class ClientManager;
 
 class Client {
@@ -557,6 +662,14 @@ class ClientManager {
   struct Holder {
     virtual ~Holder() {}
     virtual void Shutdown() = 0;
+  };
+
+  struct AlarmHolderImpl : Holder {
+    ClientAlarm v;
+
+    template <class... Args>
+    AlarmHolderImpl(Args... args) : v(std::forward<Args>(args)...) {}
+    void Shutdown() override { v.Shutdown(); }
   };
 
   template <class R>
@@ -690,6 +803,18 @@ class ClientManager {
 
     std::unique_ptr<Holder> holder(new ResponseReaderHolderImpl<R>(
         std::move(async_request2), std::move(on_done), std::move(on_error)));
+    clients_.insert(std::make_pair(client_id, std::move(holder)));
+    return std::unique_ptr<Client>(new Client(client_id, this));
+  }
+
+  std::unique_ptr<Client> CreateAlarm(std::chrono::milliseconds ms,
+                                      std::function<void()> f) {
+    std::lock_guard<std::mutex> guard(mutex_);
+
+    auto client_id = next_client_id_++;
+    auto cq = &threads_[client_id % threads_.size()].cq;
+
+    std::unique_ptr<Holder> holder(new AlarmHolderImpl(cq, ms, std::move(f)));
     clients_.insert(std::make_pair(client_id, std::move(holder)));
     return std::unique_ptr<Client>(new Client(client_id, this));
   }

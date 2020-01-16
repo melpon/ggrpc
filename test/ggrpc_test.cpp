@@ -38,6 +38,11 @@ class ClientManager {
         std::move(async_connect), std::move(read), std::move(done),
         std::move(on_error));
   }
+
+  std::unique_ptr<ggrpc::Client> CreateAlarm(std::chrono::milliseconds ms,
+                                             std::function<void()> f) {
+    return gcm_->CreateAlarm(ms, std::move(f));
+  }
 };
 
 class TestBidiHandler
@@ -124,5 +129,22 @@ int main() {
   req.set_value(100);
   bidi->Write(req);
   bidi->WritesDone();
+  std::this_thread::sleep_for(std::chrono::seconds(1));
+
+  auto alarm = cm->CreateAlarm(std::chrono::milliseconds(100),
+                               []() { SPDLOG_TRACE("Alarm"); });
+  std::this_thread::sleep_for(std::chrono::seconds(1));
+
+  alarm = cm->CreateAlarm(std::chrono::milliseconds(100), [&]() {
+    SPDLOG_TRACE("Alarm 2");
+    alarm = cm->CreateAlarm(std::chrono::milliseconds(100),
+                            []() { SPDLOG_TRACE("Alarm 3"); });
+  });
+  std::this_thread::sleep_for(std::chrono::seconds(1));
+
+  // 即座にキャンセルする
+  alarm = cm->CreateAlarm(std::chrono::milliseconds(100),
+                          [&]() { SPDLOG_ERROR("Alarm 4"); });
+  alarm.reset();
   std::this_thread::sleep_for(std::chrono::seconds(1));
 }
