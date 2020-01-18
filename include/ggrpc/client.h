@@ -420,6 +420,7 @@ class ClientResponseReaderImpl {
   grpc::Status grpc_status_;
 
   bool shutdown_ = false;
+  bool done_ = false;
   std::mutex mutex_;
 
   std::function<void(R, grpc::Status)> on_done_;
@@ -456,8 +457,12 @@ class ClientResponseReaderImpl {
 
     shutdown_ = true;
 
-    // キャンセルされるまで待つ
-    context_.TryCancel();
+    if (done_) {
+      p.reset(this);
+    } else {
+      // キャンセルされるまで待つ
+      context_.TryCancel();
+    }
   }
 
  private:
@@ -482,7 +487,10 @@ class ClientResponseReaderImpl {
         lock.lock();
       }
 
-      p.reset(this);
+      done_ = true;
+      if (shutdown_) {
+        p.reset(this);
+      }
       return;
     }
 
@@ -496,7 +504,10 @@ class ClientResponseReaderImpl {
       lock.lock();
     }
 
-    p.reset(this);
+    done_ = true;
+    if (shutdown_) {
+      p.reset(this);
+    }
   }
 };
 

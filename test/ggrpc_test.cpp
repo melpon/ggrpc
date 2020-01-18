@@ -39,9 +39,47 @@ class ClientManager {
         std::move(on_error));
   }
 
+  std::unique_ptr<ggrpc::Client> TestUnary(
+      ggrpctest::UnaryRequest request,
+      std::function<void(ggrpctest::UnaryResponse, grpc::Status)> done,
+      std::function<void(ggrpc::ClientResponseReaderError)> on_error) {
+    auto async_connect = [stub = stub_.get()](
+                             grpc::ClientContext* context,
+                             const ggrpctest::UnaryRequest& request,
+                             grpc::CompletionQueue* cq) {
+      return stub->AsyncUnary(context, request, cq);
+    };
+    return gcm_
+        ->CreateClient<ggrpctest::UnaryRequest, ggrpctest::UnaryResponse>(
+            std::move(async_connect), std::move(request), std::move(done),
+            std::move(on_error));
+  }
+
   std::unique_ptr<ggrpc::Client> CreateAlarm(std::chrono::milliseconds ms,
                                              std::function<void()> f) {
     return gcm_->CreateAlarm(ms, std::move(f));
+  }
+};
+
+class TestUnaryHandler
+    : public ggrpc::ServerResponseWriterHandler<ggrpctest::UnaryResponse,
+                                                ggrpctest::UnaryRequest> {
+  ggrpctest::Test::AsyncService* service_;
+
+ public:
+  TestUnaryHandler(ggrpctest::Test::AsyncService* service)
+      : service_(service) {}
+  void OnRequest(
+      grpc::ServerContext* context, ggrpctest::UnaryRequest* request,
+      grpc::ServerAsyncResponseWriter<ggrpctest::UnaryResponse>* response,
+      grpc::ServerCompletionQueue* cq, void* tag) override {
+    service_->RequestUnary(context, request, response, cq, cq, tag);
+  }
+  void OnAccept(ggrpctest::UnaryRequest request) override {
+    SPDLOG_TRACE("received UnaryRequest: {}", request.DebugString());
+    ggrpctest::UnaryResponse resp;
+    resp.set_value(request.value() * 100);
+    GetContext()->Finish(resp, grpc::Status::OK);
   }
 };
 
@@ -99,6 +137,7 @@ class TestServer {
 
     // ハンドラの登録
     server_->AddReaderWriterHandler<TestBidiHandler>(&service_);
+    server_->AddResponseWriterHandler<TestUnaryHandler>(&service_);
 
     server_->Start();
   }
@@ -146,5 +185,17 @@ int main() {
   alarm = cm->CreateAlarm(std::chrono::milliseconds(100),
                           [&]() { SPDLOG_ERROR("Alarm 4"); });
   alarm.reset();
+  std::this_thread::sleep_for(std::chrono::seconds(1));
+
+  ggrpctest::UnaryRequest unary_req;
+  unary_req.set_value(1);
+  auto unary = cm->TestUnary(
+      unary_req,
+      [](ggrpctest::UnaryResponse resp, grpc::Status status) {
+        SPDLOG_TRACE("received UnaryResponse {}", resp.DebugString());
+      },
+      [](ggrpc::ClientResponseReaderError error) {
+        SPDLOG_TRACE("ClientResponseReaderError: {}", (int)error);
+      });
   std::this_thread::sleep_for(std::chrono::seconds(1));
 }

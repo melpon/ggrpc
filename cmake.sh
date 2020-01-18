@@ -20,5 +20,11 @@ pushd _build/ggrpc
     -DCMAKE_BUILD_TYPE=Release \
     "$@"
   make ggrpc_test
-  ./ggrpc_test
+  rm -rf /var/crash/*ggrpc_test.*.crash
+  rm -rf crash/
+  ./ggrpc_test || true
+  if [ -e /var/crash/*ggrpc_test.*.crash ]; then
+    apport-unpack /var/crash/*ggrpc_test.*.crash crash/
+    gdb `cat crash/ExecutablePath` -c crash/CoreDump
+  fi
 popd

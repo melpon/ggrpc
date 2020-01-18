@@ -26,6 +26,284 @@
 namespace ggrpc {
 
 template <class W>
+class ResponseWriterHandler {
+ public:
+  virtual ~ResponseWriterHandler() {}
+  virtual void Shutdown() = 0;
+  virtual void Finish(W value, grpc::Status status) = 0;
+  virtual void FinishWithError(grpc::Status status) = 0;
+};
+
+template <class W>
+class ResponseWriterContext {
+  ResponseWriterHandler<W>* handler_;
+
+ public:
+  ResponseWriterContext(ResponseWriterHandler<W>* handler)
+      : handler_(handler) {}
+  ~ResponseWriterContext() { handler_->Shutdown(); }
+  void Finish(W resp, grpc::Status status) {
+    handler_->Finish(std::move(resp), status);
+  }
+  void FinishWithError(grpc::Status status) {
+    handler_->FinishWithError(status);
+  }
+};
+
+template <class W, class R>
+class ServerResponseWriterHandler : public ResponseWriterHandler<W> {
+  std::mutex mutex_;
+  grpc::ServerCompletionQueue* cq_;
+
+  bool shutdown_ = false;
+
+  grpc::ServerContext server_context_;
+  grpc::ServerAsyncResponseWriter<W> response_writer_;
+
+  std::shared_ptr<ResponseWriterContext<W>> context_;
+
+  std::function<bool()> shutdown_requested_;
+  std::function<void(grpc::ServerCompletionQueue*)> gen_handler_;
+
+  R request_;
+  struct ResponseData {
+    bool error;
+    // finish == false
+    W response;
+    // finish == true
+    grpc::Status status;
+  };
+  ResponseData response_;
+
+  struct AcceptorThunk : Handler {
+    ServerResponseWriterHandler* p;
+    AcceptorThunk(ServerResponseWriterHandler* p) : p(p) {}
+    void Proceed(bool ok) override { p->ProceedToAccept(ok); }
+  };
+  AcceptorThunk acceptor_thunk_;
+  friend class AcceptorThunk;
+
+  struct WriterThunk : Handler {
+    ServerResponseWriterHandler* p;
+    WriterThunk(ServerResponseWriterHandler* p) : p(p) {}
+    void Proceed(bool ok) override { p->ProceedToWrite(ok); }
+  };
+  WriterThunk writer_thunk_;
+  friend class WriterThunk;
+
+  struct NotifierThunk : Handler {
+    ServerResponseWriterHandler* p;
+    NotifierThunk(ServerResponseWriterHandler* p) : p(p) {}
+    void Proceed(bool ok) override { p->ProceedToNotify(ok); }
+  };
+  NotifierThunk notifier_thunk_;
+  friend class NotifierThunk;
+
+  // 状態マシン
+  enum class WriteStatus { LISTENING, IDLE, FINISHING, FINISHED };
+  WriteStatus write_status_ = WriteStatus::LISTENING;
+  void SetWriteStatus(WriteStatus status) {
+    write_status_ = status;
+    if (write_status_ == WriteStatus::FINISHED) {
+      context_.reset();
+    }
+  }
+
+  grpc::Alarm alarm_;
+  void Notify() { alarm_.Set(cq_, gpr_time_0(GPR_TIMESPAN), &notifier_thunk_); }
+
+  struct Guard {
+    ServerResponseWriterHandler* p_;
+    std::shared_ptr<ResponseWriterContext<W>> context_;
+
+    Guard(ServerResponseWriterHandler* p) : p_(p) {}
+    void Init(std::shared_ptr<ResponseWriterContext<W>> context) {
+      context_ = context;
+    }
+
+    ~Guard() {
+      if (context_ == nullptr) {
+        return;
+      }
+
+      // ここで Shutdown() が呼ばれる可能性がある
+      context_.reset();
+      // Shutdown 済みで、削除可能な状態なら削除する
+      if (p_->shutdown_ && p_->write_status_ == WriteStatus::FINISHED) {
+        delete p_;
+      }
+    }
+  };
+
+ public:
+  ServerResponseWriterHandler()
+      : response_writer_(&server_context_),
+        acceptor_thunk_(this),
+        writer_thunk_(this),
+        notifier_thunk_(this) {}
+
+  typedef W WriteType;
+  typedef R ReadType;
+  std::shared_ptr<ResponseWriterContext<W>> GetContext() { return context_; }
+
+  virtual void OnRequest(grpc::ServerContext*, R*,
+                         grpc::ServerAsyncResponseWriter<W>*,
+                         grpc::ServerCompletionQueue*, void*) = 0;
+  virtual void OnAccept(R request) = 0;
+
+  void Init(std::function<bool()> shutdown_requested,
+            std::function<void(grpc::ServerCompletionQueue*)> gen_handler,
+            grpc::ServerCompletionQueue* cq,
+            std::shared_ptr<ResponseWriterContext<W>> context) {
+    shutdown_requested_ = std::move(shutdown_requested);
+    gen_handler_ = std::move(gen_handler);
+    cq_ = cq;
+    context_ = context;
+    OnRequest(&server_context_, &request_, &response_writer_, cq_,
+              &acceptor_thunk_);
+  }
+
+  void Shutdown() override {
+    std::lock_guard<std::mutex> guard(mutex_);
+
+    if (shutdown_) {
+      return;
+    }
+
+    shutdown_ = true;
+
+    // 読み書き中だったらキャンセルされるまで待つ
+    if (write_status_ == WriteStatus::LISTENING ||
+        write_status_ == WriteStatus::FINISHING) {
+      server_context_.TryCancel();
+    } else {
+      // そうでないなら即座に終わらせて良い
+      SetWriteStatus(WriteStatus::FINISHED);
+    }
+  }
+
+  void Finish(W resp, grpc::Status status) override {
+    std::lock_guard<std::mutex> guard(mutex_);
+
+    if (shutdown_ || shutdown_requested_()) {
+      return;
+    }
+
+    if (write_status_ == WriteStatus::IDLE) {
+      response_.error = false;
+      response_.response = std::move(resp);
+      response_.status = status;
+
+      SetWriteStatus(WriteStatus::FINISHING);
+      Notify();
+    }
+  }
+
+  void FinishWithError(grpc::Status status) override {
+    std::lock_guard<std::mutex> guard(mutex_);
+
+    if (shutdown_ || shutdown_requested_()) {
+      return;
+    }
+
+    if (write_status_ == WriteStatus::IDLE) {
+      response_.error = true;
+      response_.status = status;
+
+      SetWriteStatus(WriteStatus::FINISHING);
+      Notify();
+    }
+  }
+
+ private:
+  void ProceedToAccept(bool ok) {
+    Guard guard(this);
+    std::unique_lock<std::mutex> lock(mutex_);
+    guard.Init(context_);
+
+    SPDLOG_TRACE("ProceedToAccept: ok={}", ok);
+
+    // サーバのシャットダウン要求が来てたら次の Accept 待ちをしない
+    if (shutdown_requested_()) {
+      SetWriteStatus(WriteStatus::FINISHED);
+      return;
+    }
+
+    // Accept の失敗も次の Accept 待ちをしない
+    if (!ok) {
+      SPDLOG_ERROR("Accept failed");
+      SetWriteStatus(WriteStatus::FINISHED);
+      return;
+    }
+
+    // 次の要求に備える
+    gen_handler_(cq_);
+
+    // このリクエストのシャットダウン要求されただけだった場合は次の Accept 待ちをする
+    if (shutdown_) {
+      SetWriteStatus(WriteStatus::FINISHED);
+      return;
+    }
+
+    SetWriteStatus(WriteStatus::IDLE);
+
+    lock.unlock();
+    try {
+      OnAccept(std::move(request_));
+      lock.lock();
+    } catch (...) {
+      lock.lock();
+    }
+  }
+
+  void ProceedToWrite(bool ok) {
+    Guard guard(this);
+    std::unique_lock<std::mutex> lock(mutex_);
+    guard.Init(context_);
+
+    SPDLOG_TRACE("ProceedToWrite: ok={}", ok);
+
+    if (shutdown_ || shutdown_requested_()) {
+      SetWriteStatus(WriteStatus::FINISHED);
+      return;
+    }
+
+    if (!ok) {
+      SPDLOG_ERROR("write failed");
+      SetWriteStatus(WriteStatus::FINISHED);
+      return;
+    }
+
+    SetWriteStatus(WriteStatus::FINISHED);
+  }
+
+  void ProceedToNotify(bool ok) {
+    std::lock_guard<std::mutex> guard(mutex_);
+
+    SPDLOG_TRACE("ProceedToNotify: ok={}", ok);
+
+    if (shutdown_ || shutdown_requested_()) {
+      SetWriteStatus(WriteStatus::FINISHED);
+      return;
+    }
+
+    if (!ok) {
+      SPDLOG_WARN("Alarm cancelled");
+      SetWriteStatus(WriteStatus::FINISHED);
+      return;
+    }
+
+    if (!response_.error) {
+      response_writer_.Finish(std::move(response_.response), response_.status,
+                              &writer_thunk_);
+    } else {
+      response_writer_.FinishWithError(response_.status, &writer_thunk_);
+    }
+    SetWriteStatus(WriteStatus::FINISHING);
+  }
+};
+
+template <class W>
 class WritableHandler {
  public:
   virtual ~WritableHandler() {}
@@ -40,11 +318,8 @@ class WritableContext {
 
  public:
   WritableContext(WritableHandler<W>* handler) : handler_(handler) {}
-
   ~WritableContext() { handler_->Shutdown(); }
-
   void Write(W resp) { handler_->Write(resp); }
-
   void Finish(grpc::Status status) { handler_->Finish(status); }
 };
 
@@ -62,12 +337,6 @@ class ServerReaderWriterHandler : public WritableHandler<W> {
 
   std::function<bool()> shutdown_requested_;
   std::function<void(grpc::ServerCompletionQueue*)> gen_handler_;
-  std::function<void(grpc::ServerContext*, grpc::ServerAsyncReaderWriter<W, R>*,
-                     grpc::CompletionQueue*, void*)>
-      on_request_;
-  std::function<void(std::shared_ptr<WritableContext<W>>)> on_accept_;
-  std::function<void(std::shared_ptr<WritableContext<W>>, R)> on_read_;
-  std::function<void(std::shared_ptr<WritableContext<W>>)> on_done_;
 
   R request_;
   struct ResponseData {
@@ -435,26 +704,6 @@ T* new_from_tuple(Tuple&& t) {
           std::tuple_size<std::remove_reference_t<Tuple>>::value>{});
 }
 
-// http://www.open-std.org/jtc1/sc22/wg21/docs/papers/2016/p0200r0.html
-template <typename Fun>
-class y_combinator_result {
-  Fun f;
-
- public:
-  template <typename T>
-  explicit y_combinator_result(T&& fun) : f(std::forward<T>(fun)) {}
-
-  template <typename... Args>
-  decltype(auto) operator()(Args&&... args) {
-    return f(std::ref(*this), std::forward<Args>(args)...);
-  }
-};
-
-template <typename Fun>
-y_combinator_result<std::decay_t<Fun>> y_combinator(Fun&& fun) {
-  return y_combinator_result<std::decay_t<Fun>>(std::forward<Fun>(fun));
-}
-
 class Server {
   std::vector<std::unique_ptr<grpc::ServerCompletionQueue>> cqs_;
   std::vector<std::unique_ptr<std::thread>> threads_;
@@ -488,12 +737,12 @@ class Server {
     }
 
     std::tuple<Args...> targs(std::move(args)...);
-    std::unique_ptr<GenHandler> gh(new GenHandler());
     std::function<bool()> shutdown_requested = [this]() {
       std::lock_guard<std::mutex> guard(mutex_);
       return shutdown_;
     };
 
+    std::unique_ptr<GenHandler> gh(new GenHandler());
     gh->gen_handler = [shutdown_requested = std::move(shutdown_requested),
                        gh = gh.get(), targs = std::move(targs)](
                           grpc::ServerCompletionQueue* cq) {
@@ -502,6 +751,39 @@ class Server {
           std::make_shared<WritableContext<typename H::WriteType>>(handler);
       handler->Init(shutdown_requested, gh->gen_handler, cq, context);
     };
+
+    gen_handlers_.push_back(std::move(gh));
+  }
+
+  template <class H, class... Args>
+  void AddResponseWriterHandler(Args... args) {
+    std::lock_guard<std::mutex> guard(mutex_);
+
+    // 既に Start 済み
+    if (threads_.size() != 0) {
+      return;
+    }
+    // 既に Shutdown 済み
+    if (shutdown_) {
+      return;
+    }
+
+    std::tuple<Args...> targs(std::move(args)...);
+    std::function<bool()> shutdown_requested = [this]() {
+      std::lock_guard<std::mutex> guard(mutex_);
+      return shutdown_;
+    };
+
+    std::unique_ptr<GenHandler> gh(new GenHandler());
+    gh->gen_handler =
+        [shutdown_requested = std::move(shutdown_requested), gh = gh.get(),
+         targs = std::move(targs)](grpc::ServerCompletionQueue* cq) {
+          H* handler = new_from_tuple<H>(std::move(targs));
+          auto context =
+              std::make_shared<ResponseWriterContext<typename H::WriteType>>(
+                  handler);
+          handler->Init(shutdown_requested, gh->gen_handler, cq, context);
+        };
 
     gen_handlers_.push_back(std::move(gh));
   }
@@ -570,61 +852,6 @@ class Server {
   }
 };
 
-/*
-class RunJobHandler : public ServerReaderWriterHandler<cattleshed::RunJobResponse, cattleshed::RunJobRequest> {
-public:
-  RunJobHandler(grpc::CompletionQueue* cq, cattleshed::Cattleshed::AsyncService* service) : base(cq), service_(service) { }
-
-  void Request(grpc::ServerContext* ctx,
-        grpc::ServerAsyncReaderWriter<cattleshed::RunJobResponse, cattleshed::RunJobRequest>* streamer,
-        grpc::CompletionQueue* cq,
-        void* tag) override {
-    service_->RequestRunJob(ctx, streamer, cq, cq, tag);
-  }
-
-  void OnAccept() override {
-  }
-
-  void OnRead(cattleshed::RunJobRequest req) override {
-    Write(resp);
-  }
-  void OnDoneOrError() override {
-    Write(resp);
-    Finish(grpc::Status::OK);
-  }
-};
-
-auto accept = [](std::shared_ptr<WritableContext<cattleshed::RunJobResponse>> context) {
-  context->Write(resp);
-};
-auto read = [](std::shared_ptr<WritableContext<cattleshed::RunJobResponse>> context, cattleshed::RunJobRequest req) {
-  context->Write(resp);
-  context.reset();
-};
-auto done = [](std::shared_ptr<WritableContext<cattleshed::RunJobResponse>> context) {
-  context->Write(resp);
-  context->Finish(grpc::Status::OK);
-};
-
-auto done2 = [](std::unique_ptr<Context<cattleshed::GetVersionResponse>> context) {
-  context->Finish(resp, grpc::Status::OK);
-};
-
-class CattleshedServer {
-  cattleshed::Cattleshed::AsyncService service_;
-  ggrpc::Server server_;
-
-  void Start() {
-    auto create = [this](grpc::CompletionQueue* cq) {
-      return std::unique_ptr<RunJobHandler>(new RunJobHandler(cq, &service_));
-    }
-
-    server.AddReaderWriterHandler<RunJobHandler>(accept, read, done);
-    server.AddResponseWriterHandler<cattleshed::GetVersionRequest, cattleshed::GetVersionResponse>(done2);
-    server.Start("localhost:50051", 10);
-  }
-}
-*/
 }  // namespace ggrpc
 
 #endif // GGRPC_SERVER_H_INCLUDED
