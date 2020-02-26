@@ -1,5 +1,22 @@
 cmake_minimum_required(VERSION 3.15)
 
+set(_INSTALL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/_install")
+
+if (ENABLE_TSAN)
+  set(CMAKE_PREFIX_PATH "${_INSTALL_DIR}/grpc-tsan")
+  set(CMAKE_BUILD_TYPE Debug)
+endif()
+
+if (ENABLE_ASAN)
+  set(CMAKE_PREFIX_PATH "${_INSTALL_DIR}/grpc-asan")
+  set(CMAKE_BUILD_TYPE Debug)
+endif()
+
+if (NOT ENABLE_TSAN AND NOT ENABLE_ASAN)
+  set(CMAKE_PREFIX_PATH "${_INSTALL_DIR}/grpc")
+  set(CMAKE_BUILD_TYPE Release)
+endif()
+
 project(ggrpc C CXX)
 
 find_package(Protobuf REQUIRED)
@@ -35,8 +52,16 @@ enable_testing()
 add_executable(ggrpc_test test/ggrpc_test.cpp ${GGRPC_PROTO})
 
 # tsan
-target_compile_options(ggrpc_test PRIVATE -g -fsanitize=thread)
-target_link_options(ggrpc_test PRIVATE -g -fsanitize=thread)
+if (ENABLE_TSAN)
+  target_compile_options(ggrpc_test PRIVATE -g -fsanitize=thread -fsanitize=undefined)
+  target_link_options(ggrpc_test PRIVATE -g -fsanitize=thread -fsanitize=undefined)
+endif()
+
+# asan
+if (ENABLE_ASAN)
+  target_compile_options(ggrpc_test PRIVATE -g -fsanitize=address -fsanitize=undefined)
+  target_link_options(ggrpc_test PRIVATE -g -fsanitize=address -fsanitize=undefined)
+endif()
 
 add_test(NAME ggrpc_test COMMAND $<TARGET_FILE:ggrpc_test>)
 target_compile_definitions(ggrpc_test PRIVATE SPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_TRACE)

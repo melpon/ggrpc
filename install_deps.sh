@@ -148,20 +148,45 @@ echo $GO_VERSION > $GO_VERSION_FILE
 
 # grpc (cmake)
 if [ $GRPC_CHANGED -eq 1 -o ! -e $INSTALL_DIR/grpc/lib/libgrpc++.a ]; then
-  rm -rf $BUILD_DIR/grpc-build
-  mkdir -p $BUILD_DIR/grpc-build
-  pushd $BUILD_DIR/grpc-build
-    cmake $SOURCE_DIR/grpc \
-      -DCMAKE_BUILD_TYPE=Debug \
-      -DCMAKE_C_FLAGS="-fsanitize=thread" \
-      -DCMAKE_CXX_FLAGS="-fsanitize=thread" \
-      -DCMAKE_INSTALL_PREFIX=$INSTALL_DIR/grpc \
-      -DgRPC_BUILD_CSHARP_EXT=OFF \
-      -DGO_EXECUTABLE=$INSTALL_DIR/go/bin/go \
-      -DBENCHMARK_ENABLE_TESTING=0
-    make -j$JOBS
-    make install
-  popd
+  for buildtype in release tsan asan; do
+    case "$buildtype" in
+      "release" )
+        _POSTFIX=""
+        _OPTS="
+          -DCMAKE_BUILD_TYPE=Release \
+        "
+        ;;
+      "tsan" )
+        _POSTFIX="-tsan"
+        _OPTS="
+          -DCMAKE_BUILD_TYPE=Debug \
+          -DCMAKE_C_FLAGS="-fsanitize=thread" \
+          -DCMAKE_CXX_FLAGS="-fsanitize=thread" \
+        "
+        ;;
+      "asan" )
+        _POSTFIX="-asan"
+        _OPTS="
+          -DCMAKE_BUILD_TYPE=Debug \
+          -DCMAKE_C_FLAGS="-fsanitize=address" \
+          -DCMAKE_CXX_FLAGS="-fsanitize=address" \
+        "
+        ;;
+    esac
+
+    rm -rf $BUILD_DIR/grpc-build$_POSTFIX
+    mkdir -p $BUILD_DIR/grpc-build$_POSTFIX
+    pushd $BUILD_DIR/grpc-build$_POSTFIX
+      cmake $SOURCE_DIR/grpc \
+        -DCMAKE_INSTALL_PREFIX=$INSTALL_DIR/grpc$_POSTFIX \
+        -DgRPC_BUILD_CSHARP_EXT=OFF \
+        -DGO_EXECUTABLE=$INSTALL_DIR/go/bin/go \
+        -DBENCHMARK_ENABLE_TESTING=0 \
+        $_OPTS
+      make -j$JOBS
+      make install
+    popd
+  done
 fi
 echo $GRPC_VERSION > $GRPC_VERSION_FILE
 
