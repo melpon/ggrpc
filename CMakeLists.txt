@@ -2,7 +2,6 @@ cmake_minimum_required(VERSION 3.15)
 
 project(ggrpc C CXX)
 
-find_package(ZLIB REQUIRED)
 find_package(Protobuf REQUIRED)
 find_package(gRPC REQUIRED)
 find_package(CLI11 REQUIRED)
@@ -34,6 +33,11 @@ set(GGRPC_PROTO
 
 enable_testing()
 add_executable(ggrpc_test test/ggrpc_test.cpp ${GGRPC_PROTO})
+
+# tsan
+target_compile_options(ggrpc_test PRIVATE -g -fsanitize=thread)
+target_link_options(ggrpc_test PRIVATE -g -fsanitize=thread)
+
 add_test(NAME ggrpc_test COMMAND $<TARGET_FILE:ggrpc_test>)
 target_compile_definitions(ggrpc_test PRIVATE SPDLOG_ACTIVE_LEVEL=SPDLOG_LEVEL_TRACE)
 set_target_properties(ggrpc_test PROPERTIES CXX_STANDARD 17 C_STANDARD 99)
@@ -41,6 +45,5 @@ target_include_directories(ggrpc_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/inclu
 target_include_directories(ggrpc_test PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/proto")
 target_link_libraries(ggrpc_test
   protobuf::libprotobuf
-  gRPC::grpc++_unsecure
   gRPC::grpc++
   Spdlog::Spdlog)

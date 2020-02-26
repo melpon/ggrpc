@@ -25,6 +25,7 @@ class ClientManager {
   void Shutdown() { gcm_->Shutdown(); }
 
   std::unique_ptr<ggrpc::WritableClient<ggrpctest::BidiRequest>> TestBidi(
+      std::function<void()> connected,
       std::function<void(ggrpctest::BidiResponse)> read,
       std::function<void(grpc::Status)> done,
       std::function<void(ggrpc::ClientReaderWriterError)> on_error) {
@@ -35,8 +36,8 @@ class ClientManager {
     };
     return gcm_->CreateReaderWriterClient<ggrpctest::BidiRequest,
                                           ggrpctest::BidiResponse>(
-        std::move(async_connect), std::move(read), std::move(done),
-        std::move(on_error));
+        std::move(async_connect), std::move(connected), std::move(read),
+        std::move(done), std::move(on_error));
   }
 
   std::unique_ptr<ggrpc::Client> TestUnary(
@@ -154,6 +155,7 @@ int main() {
                                      grpc::InsecureChannelCredentials());
   std::unique_ptr<ClientManager> cm(new ClientManager(channel, 10));
   auto bidi = cm->TestBidi(
+      []() { SPDLOG_TRACE("connected BidiTest"); },
       [](ggrpctest::BidiResponse resp) {
         SPDLOG_TRACE("received BidiResponse {}", resp.DebugString());
       },

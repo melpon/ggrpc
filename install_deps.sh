@@ -24,7 +24,7 @@ if [ ! -e $GO_VERSION_FILE -o "$GO_VERSION" != "`cat $GO_VERSION_FILE`" ]; then
   GO_CHANGED=1
 fi
 
-GRPC_VERSION="1.26.0"
+GRPC_VERSION="1.27.0"
 GRPC_VERSION_FILE="$INSTALL_DIR/grpc.version"
 GRPC_CHANGED=0
 if [ ! -e $GRPC_VERSION_FILE -o "$GRPC_VERSION" != "`cat $GRPC_VERSION_FILE`" ]; then
@@ -43,6 +43,18 @@ SPDLOG_VERSION_FILE="$INSTALL_DIR/spdlog.version"
 SPDLOG_CHANGED=0
 if [ ! -e $SPDLOG_VERSION_FILE -o "$SPDLOG_VERSION" != "`cat $SPDLOG_VERSION_FILE`" ]; then
   SPDLOG_CHANGED=1
+fi
+
+if [ -z "$JOBS" ]; then
+  # Linux
+  JOBS=`nproc 2>/dev/null`
+  if [ -z "$JOBS" ]; then
+    # macOS
+    JOBS=`sysctl -n hw.logicalcpu_max 2>/dev/null`
+    if [ -z "$JOBS" ]; then
+      JOBS=1
+    fi
+  fi
 fi
 
 # gRPC のソース
@@ -134,84 +146,20 @@ if [ $GO_CHANGED -eq 1 -o ! -e $INSTALL_DIR/go/bin/go ]; then
 fi
 echo $GO_VERSION > $GO_VERSION_FILE
 
-# boringssl (cmake)
-if [ $GRPC_CHANGED -eq 1 -o ! -e $INSTALL_DIR/boringssl/lib/libssl.a ]; then
-  mkdir -p $BUILD_DIR/boringssl-build
-  pushd $BUILD_DIR/boringssl-build
-    cmake $SOURCE_DIR/grpc/third_party/boringssl \
-      -DCMAKE_BUILD_TYPE=Release \
-      -DCMAKE_INSTALL_PREFIX=$INSTALL_DIR/boringssl \
-      -DGO_EXECUTABLE=$INSTALL_DIR/go/bin/go
-    make -j4
-    # make install はインストールするものが無いって言われるので
-    # 手動でインストールする
-    mkdir -p $INSTALL_DIR/boringssl/lib
-    cp ssl/libssl.a crypto/libcrypto.a $INSTALL_DIR/boringssl/lib
-    mkdir -p $INSTALL_DIR/boringssl/include
-    rm -rf $INSTALL_DIR/boringssl/include/openssl
-    cp -r $SOURCE_DIR/grpc/third_party/boringssl/include/openssl $INSTALL_DIR/boringssl/include/openssl
-  popd
-fi
-
-# zlib (pkgconfig)
-if [ $GRPC_CHANGED -eq 1 -o ! -e $INSTALL_DIR/zlib/lib/libz.a ]; then
-  rm -rf $BUILD_DIR/zlib-build
-  mkdir -p $BUILD_DIR/zlib-build
-  pushd $BUILD_DIR/zlib-build
-    $SOURCE_DIR/grpc/third_party/zlib/configure --prefix=$INSTALL_DIR/zlib --static
-    make -j4
-    make install
-    make clean
-  popd
-fi
-
-# cares (cmake)
-if [ $GRPC_CHANGED -eq 1 -o ! -e $INSTALL_DIR/cares/lib/libcares.a ]; then
-  rm -rf $BUILD_DIR/cares-build
-  mkdir -p $BUILD_DIR/cares-build
-  pushd $BUILD_DIR/cares-build
-    cmake $SOURCE_DIR/grpc/third_party/cares/cares \
-      -DCMAKE_BUILD_TYPE=Release \
-      -DCMAKE_INSTALL_PREFIX=$INSTALL_DIR/cares \
-      -DCARES_STATIC=ON \
-      -DCARES_SHARED=OFF
-    make -j4
-    make install
-  popd
-fi
-
-# protobuf (cmake)
-if [ $GRPC_CHANGED -eq 1 -o ! -e $INSTALL_DIR/protobuf/lib/libprotobuf.a ]; then
-  rm -rf $BUILD_DIR/protobuf-build
-  mkdir -p $BUILD_DIR/protobuf-build
-  pushd $BUILD_DIR/protobuf-build
-    cmake $SOURCE_DIR/grpc/third_party/protobuf/cmake \
-      -DCMAKE_BUILD_TYPE=Release \
-      -DCMAKE_INSTALL_PREFIX=$INSTALL_DIR/protobuf \
-      -DCMAKE_PREFIX_PATH="$INSTALL_DIR/zlib" \
-      -Dprotobuf_BUILD_TESTS=OFF
-    make -j4
-    make install
-  popd
-fi
-
 # grpc (cmake)
-if [ $GRPC_CHANGED -eq 1 -o ! -e $INSTALL_DIR/grpc/lib/libgrpc++_unsecure.a ]; then
+if [ $GRPC_CHANGED -eq 1 -o ! -e $INSTALL_DIR/grpc/lib/libgrpc++.a ]; then
   rm -rf $BUILD_DIR/grpc-build
   mkdir -p $BUILD_DIR/grpc-build
   pushd $BUILD_DIR/grpc-build
     cmake $SOURCE_DIR/grpc \
-      -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_BUILD_TYPE=Debug \
+      -DCMAKE_C_FLAGS="-fsanitize=thread" \
+      -DCMAKE_CXX_FLAGS="-fsanitize=thread" \
       -DCMAKE_INSTALL_PREFIX=$INSTALL_DIR/grpc \
-      -DgRPC_ZLIB_PROVIDER=package \
-      -DgRPC_CARES_PROVIDER=package \
-      -DgRPC_PROTOBUF_PROVIDER=package \
-      -DgRPC_SSL_PROVIDER=package \
       -DgRPC_BUILD_CSHARP_EXT=OFF \
-      -DOPENSSL_ROOT_DIR=$INSTALL_DIR/boringssl \
-      -DCMAKE_PREFIX_PATH="$INSTALL_DIR/cares;$INSTALL_DIR/protobuf;$INSTALL_DIR/zlib" \
+      -DGO_EXECUTABLE=$INSTALL_DIR/go/bin/go \
       -DBENCHMARK_ENABLE_TESTING=0
-    make -j4
+    make -j$JOBS
     make install
   popd
 fi
