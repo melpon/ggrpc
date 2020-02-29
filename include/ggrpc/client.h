@@ -24,47 +24,224 @@
 
 namespace ggrpc {
 
-enum ClientReaderWriterError {
+enum class ClientResponseWriterError {
+  FINISH,
+};
+
+enum class ClientReaderWriterError {
   CONNECT,
   READ,
   WRITE,
 };
 
 template <class W, class R>
-class ClientReaderWriterImpl {
+class ClientResponseReader {
+ public:
+  typedef std::function<std::unique_ptr<grpc::ClientAsyncResponseReader<R>>(
+      grpc::ClientContext*, const W&, grpc::CompletionQueue*)>
+      RequestFunc;
+  typedef std::function<void(R, grpc::Status)> OnResponseFunc;
+  typedef std::function<void(ClientResponseWriterError)> OnErrorFunc;
+
+ private:
+  struct ReaderThunk : Handler {
+    ClientResponseReader* p;
+    ReaderThunk(ClientResponseReader* p) : p(p) {}
+    void Proceed(bool ok) override { p->ProceedToRead(ok); }
+  };
+  ReaderThunk reader_thunk_;
+  friend class ReaderThunk;
+
+  grpc::ClientContext context_;
+  std::unique_ptr<grpc::ClientAsyncResponseReader<R>> reader_;
+
+  R response_;
+  grpc::Status grpc_status_;
+
+  bool shutdown_ = false;
+  bool done_ = false;
+  std::mutex mutex_;
+
+  std::function<bool()> shutdown_requested_;
+  grpc::CompletionQueue* cq_;
+
+  RequestFunc request_;
+  OnResponseFunc on_response_;
+  OnErrorFunc on_error_;
+
+  bool running_callback_ = false;
+
+ public:
+  ClientResponseReader(grpc::CompletionQueue* cq,
+                       std::function<bool()> shutdown_requested,
+                       RequestFunc request)
+      : reader_thunk_(this),
+        cq_(cq),
+        shutdown_requested_(std::move(shutdown_requested)),
+        request_(std::move(request)) {}
+
+  ~ClientResponseReader() { SPDLOG_TRACE("[0x{}] deleted", (void*)this); }
+
+  // コピー、ムーブ禁止
+  ClientResponseReader(const ClientResponseReader&) = delete;
+  ClientResponseReader(ClientResponseReader&&) = delete;
+  ClientResponseReader& operator=(const ClientResponseReader&) = delete;
+  ClientResponseReader& operator=(ClientResponseReader&&) = delete;
+
+  void SetOnResponse(OnResponseFunc on_response) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    SPDLOG_TRACE("SetOnResponse start");
+    if (shutdown_ || shutdown_requested_()) {
+      SPDLOG_TRACE("SetOnResponse shutdown requested");
+      return;
+    }
+    on_response_ = std::move(on_response);
+    SPDLOG_TRACE("SetOnResponse end");
+  }
+  void SetOnError(OnErrorFunc on_error) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (shutdown_ || shutdown_requested_()) {
+      return;
+    }
+    on_error_ = std::move(on_error_);
+  }
+
+  void Request(const W& request) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    reader_ = request_(&context_, request, cq_);
+    reader_->Finish(&response_, &grpc_status_, &reader_thunk_);
+  }
+
+  void Shutdown() {
+    std::unique_ptr<ClientResponseReader> p;
+    std::lock_guard<std::mutex> guard(mutex_);
+
+    if (shutdown_ || shutdown_requested_()) {
+      return;
+    }
+    shutdown_ = true;
+
+    on_response_ = nullptr;
+    on_error_ = nullptr;
+
+    if (!done_) {
+      // キャンセルされるまで待つ
+      context_.TryCancel();
+    }
+
+    if (Deletable()) {
+      p.reset(this);
+    }
+  }
+
+ private:
+  template <class F, class... Args>
+  void RunCallbackOnce(std::unique_lock<std::mutex>& lock, F& f,
+                       Args&&... args) {
+    // 呼び出した後に f が無効になるバージョン。
+    // f に自身の shared_ptr がバインドされている場合、無効にした時点で
+    // Shutdown が呼ばれる可能性があり、ロック中に Shutdown するとデッドロックするので
+    // アンロック中に f を無効にする必要がある。
+    if (f) {
+      auto g = std::move(f);
+      running_callback_ = true;
+      lock.unlock();
+      try {
+        g(std::forward<Args>(args)...);
+        g = nullptr;
+        lock.lock();
+        running_callback_ = false;
+      } catch (...) {
+        lock.lock();
+        running_callback_ = false;
+      }
+    }
+  }
+
+  void ProceedToRead(bool ok) {
+    std::unique_ptr<ClientResponseReader> p;
+    std::unique_lock<std::mutex> lock(mutex_);
+    SPDLOG_TRACE("[0x{}] ProceedToRead: ok={}", (void*)this, ok);
+
+    done_ = true;
+
+    if (shutdown_ || shutdown_requested_()) {
+      SPDLOG_INFO("shutdown ClientResponseReader");
+      if (Deletable()) {
+        p.reset(this);
+      }
+      return;
+    }
+
+    if (!ok) {
+      SPDLOG_ERROR("finishing error");
+      RunCallbackOnce(lock, on_error_, ClientResponseWriterError::FINISH);
+      if (Deletable()) {
+        p.reset(this);
+      }
+      return;
+    }
+
+    // 結果が取得できた
+    RunCallbackOnce(lock, on_response_, std::move(response_),
+                    std::move(grpc_status_));
+    if (Deletable()) {
+      p.reset(this);
+    }
+  }
+
+  bool Deletable() {
+    return (shutdown_ || shutdown_requested_()) && !running_callback_ && done_;
+  }
+};
+
+template <class W, class R>
+class ClientReaderWriter {
+ public:
+  typedef std::function<std::unique_ptr<grpc::ClientAsyncReaderWriter<W, R>>(
+      grpc::ClientContext*, grpc::CompletionQueue*, void*)>
+      ConnectFunc;
+  typedef std::function<void()> OnConnectFunc;
+  typedef std::function<void(R)> OnReadFunc;
+  typedef std::function<void(grpc::Status)> OnReadDoneFunc;
+  typedef std::function<void(ClientReaderWriterError)> OnErrorFunc;
+  typedef std::function<void()> OnWritesDoneFunc;
+
+ private:
   struct ConnectorThunk : Handler {
-    ClientReaderWriterImpl* p;
-    ConnectorThunk(ClientReaderWriterImpl* p) : p(p) {}
+    ClientReaderWriter* p;
+    ConnectorThunk(ClientReaderWriter* p) : p(p) {}
     void Proceed(bool ok) override { p->ProceedToConnect(ok); }
   };
   ConnectorThunk connector_thunk_;
   friend class ConnectorThunk;
 
   struct ReaderThunk : Handler {
-    ClientReaderWriterImpl* p;
-    ReaderThunk(ClientReaderWriterImpl* p) : p(p) {}
+    ClientReaderWriter* p;
+    ReaderThunk(ClientReaderWriter* p) : p(p) {}
     void Proceed(bool ok) override { p->ProceedToRead(ok); }
   };
   ReaderThunk reader_thunk_;
   friend class ReaderThunk;
 
   struct WriterThunk : Handler {
-    ClientReaderWriterImpl* p;
-    WriterThunk(ClientReaderWriterImpl* p) : p(p) {}
+    ClientReaderWriter* p;
+    WriterThunk(ClientReaderWriter* p) : p(p) {}
     void Proceed(bool ok) override { p->ProceedToWrite(ok); }
   };
   WriterThunk writer_thunk_;
   friend class WriterThunk;
 
-  // ClientAsyncReaderWriter よりも ClientContext の方が寿命が長くなるようにしないといけないので、
-  // 必ず streamer_ より上に context_ を定義すること
+  // ClientAsyncReaderWriter よりも ClientContext
+  // の方が寿命が長くなるようにしないといけないので、 必ず streamer_ より上に
+  // context_ を定義すること
   grpc::ClientContext context_;
   std::unique_ptr<grpc::ClientAsyncReaderWriter<W, R>> streamer_;
 
   enum class ReadStatus { CONNECTING, READING, FINISHING, FINISHED };
-  ReadStatus read_status_ = ReadStatus::CONNECTING;
+  ReadStatus read_status_ = ReadStatus::FINISHED;
   enum class WriteStatus { CONNECTING, WRITING, IDLE, FINISHING, FINISHED };
-  WriteStatus write_status_ = WriteStatus::CONNECTING;
+  WriteStatus write_status_ = WriteStatus::FINISHED;
 
   std::deque<std::shared_ptr<void>> request_queue_;
   R response_;
@@ -74,48 +251,93 @@ class ClientReaderWriterImpl {
   bool shutdown_ = false;
   std::mutex mutex_;
 
-  std::function<void()> on_connected_;
-  std::function<void(R)> on_read_;
-  std::function<void(grpc::Status)> on_done_;
-  std::function<void(ClientReaderWriterError)> on_error_;
+  std::function<bool()> shutdown_requested_;
+  grpc::CompletionQueue* cq_;
+  ConnectFunc connect_;
+  OnConnectFunc on_connect_;
+  OnReadFunc on_read_;
+  OnReadDoneFunc on_read_done_;
+  OnErrorFunc on_error_;
+  OnWritesDoneFunc on_writes_done_;
 
-  bool in_error_ = false;
+  bool running_callback_ = false;
 
  public:
-  ClientReaderWriterImpl(
-      std::function<std::unique_ptr<grpc::ClientAsyncReaderWriter<W, R>>(
-          grpc::ClientContext*, void*)>
-          async_connect,
-      std::function<void()> on_connected, std::function<void(R)> on_read,
-      std::function<void(grpc::Status)> on_done,
-      std::function<void(ClientReaderWriterError)> on_error)
+  ClientReaderWriter(grpc::CompletionQueue* cq,
+                     std::function<bool()> shutdown_requested,
+                     ConnectFunc connect)
       : connector_thunk_(this),
         reader_thunk_(this),
         writer_thunk_(this),
-        on_connected_(std::move(on_connected)),
-        on_read_(std::move(on_read)),
-        on_done_(std::move(on_done)),
-        on_error_(std::move(on_error)) {
-    std::lock_guard<std::mutex> guard(mutex_);
-    streamer_ = async_connect(&context_, &connector_thunk_);
-  }
-  ~ClientReaderWriterImpl() { SPDLOG_DEBUG("deleted: {}", (void*)this); }
+        cq_(cq),
+        shutdown_requested_(std::move(shutdown_requested)),
+        connect_(std::move(connect)) {}
+
+  ~ClientReaderWriter() { SPDLOG_TRACE("[0x{}] deleted", (void*)this); }
 
   // コピー、ムーブ禁止
-  ClientReaderWriterImpl(const ClientReaderWriterImpl&) = delete;
-  ClientReaderWriterImpl(ClientReaderWriterImpl&&) = delete;
-  ClientReaderWriterImpl& operator=(const ClientReaderWriterImpl&) = delete;
-  ClientReaderWriterImpl& operator=(ClientReaderWriterImpl&&) = delete;
+  ClientReaderWriter(const ClientReaderWriter&) = delete;
+  ClientReaderWriter(ClientReaderWriter&&) = delete;
+  ClientReaderWriter& operator=(const ClientReaderWriter&) = delete;
+  ClientReaderWriter& operator=(ClientReaderWriter&&) = delete;
 
-  void Shutdown() {
-    std::unique_ptr<ClientReaderWriterImpl> p;
+  void SetOnConnect(OnConnectFunc on_connect) {
     std::lock_guard<std::mutex> guard(mutex_);
-
-    if (shutdown_) {
+    if (shutdown_ || shutdown_requested_()) {
       return;
     }
+    on_connect_ = std::move(on_connect);
+  }
+  void SetOnRead(OnReadFunc on_read) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (shutdown_ || shutdown_requested_()) {
+      return;
+    }
+    on_read_ = std::move(on_read);
+  }
+  void SetOnReadDone(OnReadDoneFunc on_read_done) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (shutdown_ || shutdown_requested_()) {
+      return;
+    }
+    on_read_done_ = std::move(on_read_done);
+  }
+  void SetOnWritesDone(OnWritesDoneFunc on_writes_done) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (shutdown_ || shutdown_requested_()) {
+      return;
+    }
+    on_writes_done_ = std::move(on_writes_done);
+  }
+  void SetOnError(OnErrorFunc on_error) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (shutdown_ || shutdown_requested_()) {
+      return;
+    }
+    on_error_ = std::move(on_error_);
+  }
 
+  void Connect() {
+    std::lock_guard<std::mutex> guard(mutex_);
+    read_status_ = ReadStatus::CONNECTING;
+    write_status_ = WriteStatus::CONNECTING;
+    streamer_ = connect_(&context_, cq_, &connector_thunk_);
+  }
+
+  void Shutdown() {
+    std::unique_ptr<ClientReaderWriter> p;
+    std::lock_guard<std::mutex> guard(mutex_);
+
+    if (shutdown_ || shutdown_requested_()) {
+      return;
+    }
     shutdown_ = true;
+
+    on_connect_ = nullptr;
+    on_read_ = nullptr;
+    on_read_done_ = nullptr;
+    on_writes_done_ = nullptr;
+    on_error_ = nullptr;
 
     // 読み書き中だったらキャンセルされるまで待つ
     if (read_status_ == ReadStatus::CONNECTING ||
@@ -137,9 +359,10 @@ class ClientReaderWriterImpl {
 
   void Write(W request) {
     std::lock_guard<std::mutex> guard(mutex_);
-    SPDLOG_TRACE("Write: {}", (void*)this);
+    SPDLOG_TRACE("[0x{}] Write: request={}", (void*)this,
+                 request.DebugString());
 
-    if (shutdown_) {
+    if (shutdown_ || shutdown_requested_()) {
       return;
     }
 
@@ -156,39 +379,49 @@ class ClientReaderWriterImpl {
   void WritesDone() {
     std::lock_guard<std::mutex> guard(mutex_);
 
-    if (shutdown_) {
+    if (shutdown_ || shutdown_requested_()) {
       return;
     }
 
     if (write_status_ == WriteStatus::IDLE) {
       streamer_->WritesDone(&writer_thunk_);
       write_status_ = WriteStatus::FINISHING;
-    } else if (write_status_ == WriteStatus::WRITING) {
+    } else if (write_status_ == WriteStatus::WRITING ||
+               write_status_ == WriteStatus::CONNECTING) {
       request_queue_.push_back(nullptr);
     }
   }
 
  private:
-  void OnError(std::unique_lock<std::mutex>& lock,
-               ClientReaderWriterError error) {
-    in_error_ = true;
-    lock.unlock();
-    try {
-      on_error_(error);
-      lock.lock();
-      in_error_ = false;
-    } catch (...) {
-      lock.lock();
-      in_error_ = false;
+  template <class F, class... Args>
+  void RunCallback(std::unique_lock<std::mutex>& lock, F f, Args&&... args) {
+    // 普通にコールバックするとデッドロックの可能性があるので
+    // unlock してからコールバックする。
+    // 再度ロックした時に状態が変わってる可能性があるので注意すること。
+    if (f) {
+      running_callback_ = true;
+      lock.unlock();
+      try {
+        f(std::forward<Args>(args)...);
+        // f に自身の shared_ptr がバインドされていて、コールバック中に SetOn〜 で nullptr が渡されてた場合、
+        // RunCallback を抜ける時に Shutdown が呼ばれる可能性があり、ロック中に Shutdown するとデッドロックするので
+        // アンロック中に f を無効にする必要がある。
+        f = nullptr;
+        lock.lock();
+        running_callback_ = false;
+      } catch (...) {
+        lock.lock();
+        running_callback_ = false;
+      }
     }
   }
 
   void ProceedToConnect(bool ok) {
-    std::unique_ptr<ClientReaderWriterImpl> p;
+    std::unique_ptr<ClientReaderWriter> p;
     std::unique_lock<std::mutex> lock(mutex_);
-    SPDLOG_TRACE("ProceedToConnect: {}", (void*)this);
+    SPDLOG_TRACE("[0x{}] ProceedToConnect: ok={}", (void*)this, ok);
 
-    if (shutdown_) {
+    if (shutdown_ || shutdown_requested_()) {
       read_status_ = ReadStatus::FINISHED;
       write_status_ = WriteStatus::FINISHED;
       if (Deletable()) {
@@ -202,23 +435,17 @@ class ClientReaderWriterImpl {
 
       read_status_ = ReadStatus::FINISHED;
       write_status_ = WriteStatus::FINISHED;
-      OnError(lock, ClientReaderWriterError::CONNECT);
+      RunCallback(lock, on_error_, ClientReaderWriterError::CONNECT);
       if (Deletable()) {
         p.reset(this);
       }
       return;
     }
 
-    lock.unlock();
-    try {
-      on_connected_();
-      lock.lock();
-    } catch (...) {
-      lock.lock();
-    }
+    RunCallback(lock, on_connect_);
 
     // 終了要求が来てたので読み込みをせずに終了
-    if (shutdown_) {
+    if (shutdown_ || shutdown_requested_()) {
       read_status_ = ReadStatus::FINISHED;
       write_status_ = WriteStatus::FINISHED;
       if (Deletable()) {
@@ -235,11 +462,11 @@ class ClientReaderWriterImpl {
   }
 
   void ProceedToRead(bool ok) {
-    std::unique_ptr<ClientReaderWriterImpl> p;
+    std::unique_ptr<ClientReaderWriter> p;
     std::unique_lock<std::mutex> lock(mutex_);
-    SPDLOG_TRACE("ProceedToRead: {}", (void*)this);
+    SPDLOG_TRACE("[0x{}] ProceedToRead: ok={}", (void*)this, ok);
 
-    if (shutdown_) {
+    if (shutdown_ || shutdown_requested_()) {
       read_status_ = ReadStatus::FINISHED;
       if (Deletable()) {
         p.reset(this);
@@ -263,7 +490,7 @@ class ClientReaderWriterImpl {
           write_status_ = WriteStatus::FINISHED;
         }
         read_status_ = ReadStatus::FINISHED;
-        OnError(lock, ClientReaderWriterError::READ);
+        RunCallback(lock, on_error_, ClientReaderWriterError::READ);
         if (Deletable()) {
           p.reset(this);
         }
@@ -274,19 +501,10 @@ class ClientReaderWriterImpl {
     if (read_status_ == ReadStatus::READING) {
       // 結果が取得できた
 
-      // 普通にコールバックするとデッドロックの可能性があるので
-      // unlock してからコールバックする。
-      // 再度ロックした時に状態が変わってる可能性があるので注意すること。
-      lock.unlock();
-      try {
-        on_read_(std::move(response_));
-        lock.lock();
-      } catch (...) {
-        lock.lock();
-      }
+      RunCallback(lock, on_read_, std::move(response_));
 
       // 終了要求が来てたので次の読み込みをせずに終了
-      if (shutdown_) {
+      if (shutdown_ || shutdown_requested_()) {
         read_status_ = ReadStatus::FINISHED;
         if (Deletable()) {
           p.reset(this);
@@ -300,16 +518,7 @@ class ClientReaderWriterImpl {
     } else if (read_status_ == ReadStatus::FINISHING) {
       // 終了
 
-      // 普通にコールバックするとデッドロックの可能性があるので
-      // unlock してからコールバックする。
-      // 再度ロックした時に状態が変わってる可能性があるので注意すること。
-      lock.unlock();
-      try {
-        on_done_(std::move(grpc_status_));
-        lock.lock();
-      } catch (...) {
-        lock.lock();
-      }
+      RunCallback(lock, on_read_done_, grpc_status_);
 
       if (grpc_status_.ok()) {
         SPDLOG_DEBUG("gRPC Read finished");
@@ -327,11 +536,11 @@ class ClientReaderWriterImpl {
   }
 
   void ProceedToWrite(bool ok) {
-    std::unique_ptr<ClientReaderWriterImpl> p;
+    std::unique_ptr<ClientReaderWriter> p;
     std::unique_lock<std::mutex> lock(mutex_);
-    SPDLOG_TRACE("ProceedToWrite: {}", (void*)this);
+    SPDLOG_TRACE("[0x{}] ProceedToWrite: ok={}", (void*)this, ok);
 
-    if (shutdown_) {
+    if (shutdown_ || shutdown_requested_()) {
       write_status_ = WriteStatus::FINISHED;
       if (Deletable()) {
         p.reset(this);
@@ -349,7 +558,7 @@ class ClientReaderWriterImpl {
         read_status_ = ReadStatus::FINISHED;
       }
       write_status_ = WriteStatus::FINISHED;
-      OnError(lock, ClientReaderWriterError::WRITE);
+      RunCallback(lock, on_error_, ClientReaderWriterError::WRITE);
       if (Deletable()) {
         p.reset(this);
       }
@@ -357,6 +566,8 @@ class ClientReaderWriterImpl {
     }
 
     if (write_status_ == WriteStatus::FINISHING) {
+      RunCallback(lock, on_writes_done_);
+
       // 書き込み完了。
       // あとは読み込みが全て終了したら終わり。
       write_status_ = WriteStatus::FINISHED;
@@ -389,296 +600,10 @@ class ClientReaderWriterImpl {
   }
 
   bool Deletable() const {
-    return shutdown_ && !in_error_ && read_status_ == ReadStatus::FINISHED &&
+    return (shutdown_ || shutdown_requested_()) && !running_callback_ &&
+           read_status_ == ReadStatus::FINISHED &&
            write_status_ == WriteStatus::FINISHED;
   }
-};
-
-template <class W, class R>
-class ClientReaderWriter {
-  ClientReaderWriterImpl<W, R>* p_;
-
- public:
-  template <class... Args>
-  ClientReaderWriter(Args... args)
-      : p_(new ClientReaderWriterImpl<W, R>(std::forward<Args>(args)...)) {}
-
-  ~ClientReaderWriter() { Shutdown(); }
-
-  // コピー、ムーブ禁止
-  ClientReaderWriter(const ClientReaderWriter&) = delete;
-  ClientReaderWriter(ClientReaderWriter&&) = delete;
-  ClientReaderWriter& operator=(const ClientReaderWriter&) = delete;
-  ClientReaderWriter& operator=(ClientReaderWriter&&) = delete;
-
-  void Shutdown() { p_->Shutdown(); }
-  void Write(W request) { p_->Write(std::move(request)); }
-
-  void WritesDone() { p_->WritesDone(); }
-};
-
-enum ClientResponseReaderError {
-  FINISH,
-};
-
-template <class R>
-class ClientResponseReaderImpl {
-  struct ReaderThunk : Handler {
-    ClientResponseReaderImpl* p;
-    ReaderThunk(ClientResponseReaderImpl* p) : p(p) {}
-    void Proceed(bool ok) override { p->ProceedToRead(ok); }
-  };
-  ReaderThunk reader_thunk_;
-  friend class ReaderThunk;
-
-  // ClientAsyncResponseReader よりも ClientContext の方が寿命が長くなるようにしないといけないので、
-  // 必ず reader_ より上に context_ を定義すること
-  grpc::ClientContext context_;
-  std::unique_ptr<grpc::ClientAsyncResponseReader<R>> reader_;
-
-  R response_;
-  grpc::Status grpc_status_;
-
-  bool shutdown_ = false;
-  bool done_ = false;
-  std::mutex mutex_;
-
-  std::function<void(R, grpc::Status)> on_done_;
-  std::function<void(ClientResponseReaderError)> on_error_;
-
- public:
-  ClientResponseReaderImpl(
-      std::function<std::unique_ptr<grpc::ClientAsyncResponseReader<R>>(
-          grpc::ClientContext*)> async_request,
-      std::function<void(R, grpc::Status)> on_done,
-      std::function<void(ClientResponseReaderError)> on_error)
-      : reader_thunk_(this),
-        on_done_(std::move(on_done)),
-        on_error_(std::move(on_error)) {
-    std::lock_guard<std::mutex> guard(mutex_);
-    reader_ = async_request(&context_);
-    reader_->Finish(&response_, &grpc_status_, &reader_thunk_);
-  }
-  ~ClientResponseReaderImpl() { SPDLOG_DEBUG("deleted: {}", (void*)this); }
-
-  // コピー、ムーブ禁止
-  ClientResponseReaderImpl(const ClientResponseReaderImpl&) = delete;
-  ClientResponseReaderImpl(ClientResponseReaderImpl&&) = delete;
-  ClientResponseReaderImpl& operator=(const ClientResponseReaderImpl&) = delete;
-  ClientResponseReaderImpl& operator=(ClientResponseReaderImpl&&) = delete;
-
-  void Shutdown() {
-    std::unique_ptr<ClientResponseReaderImpl> p;
-    std::lock_guard<std::mutex> guard(mutex_);
-
-    if (shutdown_) {
-      return;
-    }
-
-    shutdown_ = true;
-
-    if (done_) {
-      p.reset(this);
-    } else {
-      // キャンセルされるまで待つ
-      context_.TryCancel();
-    }
-  }
-
- private:
-  void ProceedToRead(bool ok) {
-    std::unique_ptr<ClientResponseReaderImpl> p;
-    std::unique_lock<std::mutex> lock(mutex_);
-    SPDLOG_TRACE("ProceedToRead: {}", (void*)this);
-
-    if (shutdown_) {
-      SPDLOG_INFO("shutdown ClientResponseReaderImpl");
-      p.reset(this);
-      return;
-    }
-
-    if (!ok) {
-      SPDLOG_ERROR("finishing error");
-      lock.unlock();
-      try {
-        on_error_(ClientResponseReaderError::FINISH);
-        lock.lock();
-      } catch (...) {
-        lock.lock();
-      }
-
-      done_ = true;
-      if (shutdown_) {
-        p.reset(this);
-      }
-      return;
-    }
-
-    // 結果が取得できた
-
-    lock.unlock();
-    try {
-      on_done_(std::move(response_), std::move(grpc_status_));
-      lock.lock();
-    } catch (...) {
-      lock.lock();
-    }
-
-    done_ = true;
-    if (shutdown_) {
-      p.reset(this);
-    }
-  }
-};
-
-template <class R>
-class ClientResponseReader {
-  ClientResponseReaderImpl<R>* p_;
-
- public:
-  template <class... Args>
-  ClientResponseReader(Args... args)
-      : p_(new ClientResponseReaderImpl<R>(std::forward<Args>(args)...)) {}
-
-  ~ClientResponseReader() { Shutdown(); }
-
-  // コピー、ムーブ禁止
-  ClientResponseReader(const ClientResponseReader&) = delete;
-  ClientResponseReader(ClientResponseReader&&) = delete;
-  ClientResponseReader& operator=(const ClientResponseReader&) = delete;
-  ClientResponseReader& operator=(ClientResponseReader&&) = delete;
-
-  void Shutdown() { p_->Shutdown(); }
-};
-
-class ClientAlarmImpl {
-  std::mutex mutex_;
-
-  struct NotifierThunk : Handler {
-    ClientAlarmImpl* p;
-    NotifierThunk(ClientAlarmImpl* p) : p(p) {}
-    void Proceed(bool ok) override { p->ProceedToNotify(ok); }
-  };
-  NotifierThunk notifier_thunk_;
-  friend class NotifierThunk;
-
-  grpc::CompletionQueue* cq_;
-  grpc::Alarm alarm_;
-  std::function<void()> on_done_;
-  bool shutdown_ = false;
-  bool notified_ = false;
-
- public:
-  ClientAlarmImpl(grpc::CompletionQueue* cq, std::chrono::milliseconds ms,
-                  std::function<void()> f)
-      : notifier_thunk_(this), cq_(cq) {
-    std::lock_guard<std::mutex> guard(mutex_);
-    on_done_ = std::move(f);
-    gpr_timespec ts;
-    ts.clock_type = GPR_TIMESPAN;
-    ts.tv_sec = ms.count() / 1000;
-    ts.tv_nsec = (ms.count() % 1000) * 1000000;
-    alarm_.Set(cq_, ts, &notifier_thunk_);
-  }
-  ~ClientAlarmImpl() { SPDLOG_DEBUG("deleted: {}", (void*)this); }
-
-  // コピー、ムーブ禁止
-  ClientAlarmImpl(const ClientAlarmImpl&) = delete;
-  ClientAlarmImpl(ClientAlarmImpl&&) = delete;
-  ClientAlarmImpl& operator=(const ClientAlarmImpl&) = delete;
-  ClientAlarmImpl& operator=(ClientAlarmImpl&&) = delete;
-
-  void Shutdown() {
-    std::unique_ptr<ClientAlarmImpl> p;
-
-    std::lock_guard<std::mutex> guard(mutex_);
-    if (shutdown_) {
-      return;
-    }
-    alarm_.Cancel();
-    shutdown_ = true;
-    if (notified_ && shutdown_) {
-      p.reset(this);
-    }
-  }
-
- private:
-  void ProceedToNotify(bool ok) {
-    std::unique_ptr<ClientAlarmImpl> p;
-
-    std::unique_lock<std::mutex> lock(mutex_);
-    SPDLOG_TRACE("ProceedToNotify: this={}, ok={}", (void*)this, ok);
-
-    if (!ok || shutdown_) {
-      notified_ = true;
-
-      // キャンセルされた
-      if (shutdown_ && notified_) {
-        p.reset(this);
-      }
-      return;
-    }
-
-    // ロック中に on_done_ を取得しておく
-    auto f = std::move(on_done_);
-    lock.unlock();
-    try {
-      f();
-      lock.lock();
-    } catch (...) {
-      lock.lock();
-    }
-
-    notified_ = true;
-
-    // コールバックが終わって Shutdown が呼ばれてたら終了
-    if (shutdown_ && notified_) {
-      p.reset(this);
-    }
-  }
-};
-
-class ClientAlarm {
-  ClientAlarmImpl* p_;
-
- public:
-  template <class... Args>
-  ClientAlarm(Args... args)
-      : p_(new ClientAlarmImpl(std::forward<Args>(args)...)) {}
-  ~ClientAlarm() { Shutdown(); }
-
-  ClientAlarm(const ClientAlarm&) = delete;
-  ClientAlarm(ClientAlarm&&) = delete;
-  ClientAlarm& operator=(const ClientAlarm&) = delete;
-  ClientAlarm& operator=(ClientAlarm&&) = delete;
-
-  void Shutdown() { p_->Shutdown(); }
-};
-
-class ClientManager;
-
-class Client {
-  uint32_t client_id_;
-  ClientManager* cm_;
-
- public:
-  Client(uint32_t client_id, ClientManager* cm)
-      : client_id_(client_id), cm_(cm) {}
-  ~Client();
-};
-
-template <class W>
-class WritableClient {
-  uint32_t client_id_;
-  ClientManager* cm_;
-
- public:
-  WritableClient(uint32_t client_id, ClientManager* cm)
-      : client_id_(client_id), cm_(cm) {}
-  ~WritableClient();
-
-  void Write(W data);
-  void WritesDone();
 };
 
 class ClientManager {
@@ -690,58 +615,15 @@ class ClientManager {
   };
   std::vector<ThreadData> threads_;
 
-  struct Holder {
-    virtual ~Holder() {}
-    virtual void Shutdown() = 0;
-  };
-
-  struct AlarmHolderImpl : Holder {
-    ClientAlarm v;
-
-    template <class... Args>
-    AlarmHolderImpl(Args... args) : v(std::forward<Args>(args)...) {}
-    void Shutdown() override { v.Shutdown(); }
-  };
-
-  template <class R>
-  struct ResponseReaderHolderImpl : Holder {
-    ClientResponseReader<R> v;
-
-    template <class... Args>
-    ResponseReaderHolderImpl(Args... args) : v(std::forward<Args>(args)...) {}
-    void Shutdown() override { v.Shutdown(); }
-  };
-
-  // 全ての ClientReaderWriter<W, R> を同じ変数に入れたいので
-  // type erasure イディオムを使う
-  struct WritableHolder : Holder {
-    virtual ~WritableHolder() {}
-    virtual const std::type_info& WriterTypeInfo() const = 0;
-    virtual void Write(void* p) = 0;
-    virtual void WritesDone() = 0;
-    virtual void Shutdown() = 0;
-  };
-
-  template <class W, class R>
-  struct ReaderWriterHolderImpl : WritableHolder {
-    ClientReaderWriter<W, R> v;
-
-    template <class... Args>
-    ReaderWriterHolderImpl(Args... args) : v(std::forward<Args>(args)...) {}
-
-    const std::type_info& WriterTypeInfo() const override { return typeid(W); }
-    void Write(void* p) override { v.Write(std::move(*(W*)p)); }
-    void WritesDone() override { v.WritesDone(); }
-    void Shutdown() override { v.Shutdown(); }
-  };
-
   uint32_t next_client_id_ = 0;
-  std::map<uint32_t, std::unique_ptr<Holder>> clients_;
-  std::map<uint32_t, std::unique_ptr<WritableHolder>> writable_clients_;
-  bool shutdown_ = false;
+  std::atomic_bool shutdown_{false};
 
  public:
-  ClientManager(int threads) : threads_(threads) {
+  ClientManager(int threads) : threads_(threads) {}
+
+  ~ClientManager() { Shutdown(); }
+
+  void Start() {
     for (auto& th : threads_) {
       th.thread.reset(new std::thread([& cq = th.cq]() {
         void* got_tag;
@@ -755,19 +637,15 @@ class ClientManager {
     }
   }
 
-  ~ClientManager() { Shutdown(); }
-
   void Shutdown() {
     std::lock_guard<std::mutex> guard(mutex_);
 
-    if (shutdown_) return;
-    SPDLOG_TRACE("ClientManager::Shutdown started");
-
+    if (shutdown_) {
+      return;
+    }
     shutdown_ = true;
 
-    // これで各接続の ClientReaderWriter::Shutdown が呼ばれる。
-    clients_.clear();
-    writable_clients_.clear();
+    SPDLOG_TRACE("ClientManager::Shutdown started");
 
     // キューを Shutdown して、全てのスレッドが終了するのを待つ
     // コールバックの処理で無限ループしてるとかじゃない限りは終了するはず
@@ -778,149 +656,45 @@ class ClientManager {
     SPDLOG_TRACE("ClientManager::Shutdown released completion queue");
 
     for (auto& th : threads_) {
-      th.thread->join();
+      if (th.thread != nullptr) {
+        th.thread->join();
+      }
+      th.thread = nullptr;
     }
 
     SPDLOG_TRACE("ClientManager::Shutdown finished");
   }
 
   template <class W, class R>
-  std::unique_ptr<WritableClient<W>> CreateReaderWriterClient(
-      std::function<std::unique_ptr<grpc::ClientAsyncReaderWriter<W, R>>(
-          grpc::ClientContext*, grpc::CompletionQueue*, void*)>
-          async_connect,
-      std::function<void()> on_connected, std::function<void(R)> on_read,
-      std::function<void(grpc::Status)> on_done,
-      std::function<void(ClientReaderWriterError)> on_error) {
+  std::shared_ptr<ClientResponseReader<W, R>> CreateResponseReader(
+      typename ClientResponseReader<W, R>::RequestFunc request) {
     std::lock_guard<std::mutex> guard(mutex_);
 
     auto client_id = next_client_id_++;
-
-    // cq を bind して引数を減らす
     auto cq = &threads_[client_id % threads_.size()].cq;
-    auto async_connect2 = [f = std::move(async_connect), cq](
-                              grpc::ClientContext* client, void* tag) {
-      return std::move(f)(client, cq, tag);
-    };
 
-    std::unique_ptr<WritableHolder> holder(new ReaderWriterHolderImpl<W, R>(
-        std::move(async_connect2), std::move(on_connected), std::move(on_read),
-        std::move(on_done), std::move(on_error)));
-    writable_clients_.insert(std::make_pair(client_id, std::move(holder)));
-    return std::unique_ptr<WritableClient<W>>(
-        new WritableClient<W>(client_id, this));
+    std::shared_ptr<ClientResponseReader<W, R>> p(
+        new ClientResponseReader<W, R>(
+            cq, [this]() -> bool { return shutdown_; }, std::move(request)),
+        [](ClientResponseReader<W, R>* p) { p->Shutdown(); });
+    return p;
   }
 
   template <class W, class R>
-  std::unique_ptr<Client> CreateClient(
-      std::function<std::unique_ptr<grpc::ClientAsyncResponseReader<R>>(
-          grpc::ClientContext*,
-          const W&,
-          grpc::CompletionQueue*)> async_request,
-      const W& request,
-      std::function<void(R, grpc::Status)> on_done,
-      std::function<void(ClientResponseReaderError)> on_error) {
-    std::lock_guard<std::mutex> guard(mutex_);
-
-    auto client_id = next_client_id_++;
-
-    // cq と request を bind して引数を減らす
-    auto cq = &threads_[client_id % threads_.size()].cq;
-    auto async_request2 = [f = std::move(async_request), &request,
-                           cq](grpc::ClientContext* client) {
-      return std::move(f)(client, request, cq);
-    };
-
-    std::unique_ptr<Holder> holder(new ResponseReaderHolderImpl<R>(
-        std::move(async_request2), std::move(on_done), std::move(on_error)));
-    clients_.insert(std::make_pair(client_id, std::move(holder)));
-    return std::unique_ptr<Client>(new Client(client_id, this));
-  }
-
-  std::unique_ptr<Client> CreateAlarm(std::chrono::milliseconds ms,
-                                      std::function<void()> f) {
+  std::shared_ptr<ClientReaderWriter<W, R>> CreateReaderWriter(
+      typename ClientReaderWriter<W, R>::ConnectFunc connect) {
     std::lock_guard<std::mutex> guard(mutex_);
 
     auto client_id = next_client_id_++;
     auto cq = &threads_[client_id % threads_.size()].cq;
 
-    std::unique_ptr<Holder> holder(new AlarmHolderImpl(cq, ms, std::move(f)));
-    clients_.insert(std::make_pair(client_id, std::move(holder)));
-    return std::unique_ptr<Client>(new Client(client_id, this));
-  }
-
- private:
-  WritableHolder* GetWritableClient(uint32_t client_id) {
-    if (shutdown_) {
-      return nullptr;
-    }
-
-    auto it = writable_clients_.find(client_id);
-    if (it == writable_clients_.end()) {
-      return nullptr;
-    }
-
-    return it->second.get();
-  }
-
-  // 以下は Client からのみアクセスさせる
-  friend class Client;
-
-  void DestroyClient(uint32_t client_id) {
-    std::lock_guard<std::mutex> guard(mutex_);
-    clients_.erase(client_id);
-  }
-
-  // 以下は WritableClient<W> からのみアクセスさせる
-  template <class W>
-  friend class WritableClient;
-
-  void DestroyWritableClient(uint32_t client_id) {
-    std::lock_guard<std::mutex> guard(mutex_);
-    writable_clients_.erase(client_id);
-  }
-
-  template <class W>
-  void Write(uint32_t client_id, W req) {
-    std::lock_guard<std::mutex> guard(mutex_);
-
-    auto client = GetWritableClient(client_id);
-    if (client == nullptr) {
-      return;
-    }
-    // 書き込む型が一致してない
-    if (client->WriterTypeInfo() != typeid(W)) {
-      return;
-    }
-
-    client->Write(&req);
-  }
-  void WritesDone(uint32_t client_id) {
-    std::lock_guard<std::mutex> guard(mutex_);
-
-    auto client = GetWritableClient(client_id);
-    if (client == nullptr) {
-      return;
-    }
-
-    client->WritesDone();
+    std::shared_ptr<ClientReaderWriter<W, R>> p(
+        new ClientReaderWriter<W, R>(cq, [this]() -> bool { return shutdown_; },
+                                     std::move(connect)),
+        [](ClientReaderWriter<W, R>* p) { p->Shutdown(); });
+    return p;
   }
 };
-
-inline Client::~Client() { cm_->DestroyClient(client_id_); }
-
-template <class W>
-WritableClient<W>::~WritableClient() {
-  cm_->DestroyWritableClient(client_id_);
-}
-template <class W>
-void WritableClient<W>::Write(W data) {
-  cm_->Write(client_id_, std::move(data));
-}
-template <class W>
-void WritableClient<W>::WritesDone() {
-  cm_->WritesDone(client_id_);
-}
 
 }  // namespace ggrpc
 

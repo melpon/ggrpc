@@ -17,14 +17,7 @@ if [ ! -e $CMAKE_VERSION_FILE -o "$CMAKE_VERSION" != "`cat $CMAKE_VERSION_FILE`"
   CMAKE_CHANGED=1
 fi
 
-GO_VERSION="1.13"
-GO_VERSION_FILE="$INSTALL_DIR/go.version"
-GO_CHANGED=0
-if [ ! -e $GO_VERSION_FILE -o "$GO_VERSION" != "`cat $GO_VERSION_FILE`" ]; then
-  GO_CHANGED=1
-fi
-
-GRPC_VERSION="1.27.0"
+GRPC_VERSION="1.28.0"
 GRPC_VERSION_FILE="$INSTALL_DIR/grpc.version"
 GRPC_CHANGED=0
 if [ ! -e $GRPC_VERSION_FILE -o "$GRPC_VERSION" != "`cat $GRPC_VERSION_FILE`" ]; then
@@ -56,16 +49,6 @@ if [ -z "$JOBS" ]; then
     fi
   fi
 fi
-
-# gRPC のソース
-if [ ! -e $SOURCE_DIR/grpc/.git ]; then
-  git clone https://github.com/grpc/grpc.git $SOURCE_DIR/grpc
-fi
-pushd $SOURCE_DIR/grpc
-  git fetch
-  git reset --hard v$GRPC_VERSION
-  git submodule update -i --recursive
-popd
 
 # CMake が古いとビルド出来ないので、CMake のバイナリをダウンロードする
 if [ $CMAKE_CHANGED -eq 1 -o ! -e $INSTALL_DIR/cmake/bin/cmake ]; then
@@ -102,52 +85,18 @@ else
   export PATH=$INSTALL_DIR/cmake/bin:$PATH
 fi
 
-# Go
-if [ $GO_CHANGED -eq 1 -o ! -e $INSTALL_DIR/go/bin/go ]; then
-  # Bootstrap
-  _URL=https://dl.google.com/go/go1.4-bootstrap-20171003.tar.gz
-  _FILE=$SOURCE_DIR/go1.4-bootstrap-20171003.tar.gz
-  if [ ! -e $_FILE ]; then
-    echo "file(DOWNLOAD $_URL $_FILE)" > $BUILD_DIR/tmp.cmake
-    cmake -P $BUILD_DIR/tmp.cmake
-    rm $BUILD_DIR/tmp.cmake
-  fi
-
-  pushd $BUILD_DIR
-    rm -rf go
-    rm -rf go-bootstrap
-    cmake -E tar xf $_FILE
-    mv go go-bootstrap
-  popd
-
-  pushd $BUILD_DIR/go-bootstrap/src
-    CGO_ENABLED=0 ./make.bash
-  popd
-
-  # 本体
-  _URL=https://github.com/golang/go/archive/go$GO_VERSION.tar.gz
-  _FILE=$SOURCE_DIR/go$GO_VERSION.tar.gz
-  if [ ! -e $_FILE ]; then
-    echo "file(DOWNLOAD $_URL $_FILE)" > $BUILD_DIR/tmp.cmake
-    cmake -P $BUILD_DIR/tmp.cmake
-    rm $BUILD_DIR/tmp.cmake
-  fi
-
-  pushd $SOURCE_DIR
-    rm -rf go-go$GO_VERSION
-    rm -rf $INSTALL_DIR/go
-    cmake -E tar xf $_FILE
-    mv go-go$GO_VERSION $INSTALL_DIR/go
-  popd
-
-  pushd $INSTALL_DIR/go/src
-    GOROOT_BOOTSTRAP=$BUILD_DIR/go-bootstrap ./make.bash
-  popd
-fi
-echo $GO_VERSION > $GO_VERSION_FILE
-
 # grpc (cmake)
 if [ $GRPC_CHANGED -eq 1 -o ! -e $INSTALL_DIR/grpc/lib/libgrpc++.a ]; then
+  # gRPC のソース
+  if [ ! -e $SOURCE_DIR/grpc/.git ]; then
+    git clone https://github.com/grpc/grpc.git $SOURCE_DIR/grpc
+  fi
+  pushd $SOURCE_DIR/grpc
+    git fetch
+    git reset --hard v$GRPC_VERSION
+    git submodule update -i --recursive
+  popd
+
   for buildtype in release tsan asan; do
     case "$buildtype" in
       "release" )
@@ -180,7 +129,6 @@ if [ $GRPC_CHANGED -eq 1 -o ! -e $INSTALL_DIR/grpc/lib/libgrpc++.a ]; then
       cmake $SOURCE_DIR/grpc \
         -DCMAKE_INSTALL_PREFIX=$INSTALL_DIR/grpc$_POSTFIX \
         -DgRPC_BUILD_CSHARP_EXT=OFF \
-        -DGO_EXECUTABLE=$INSTALL_DIR/go/bin/go \
         -DBENCHMARK_ENABLE_TESTING=0 \
         $_OPTS
       make -j$JOBS
