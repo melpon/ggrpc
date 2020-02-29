@@ -144,8 +144,35 @@ class TestServer {
   }
 };
 
+// Bidiクライアントの接続コールバック時にいろいろやってもちゃんと動くか
+void test_client_bidi_connect_callback() {
+  std::unique_ptr<TestServer> server(new TestServer());
+  server->Start("0.0.0.0:50051", 10);
+  std::this_thread::sleep_for(std::chrono::seconds(1));
+
+  auto channel = grpc::CreateChannel("localhost:50051",
+                                     grpc::InsecureChannelCredentials());
+  std::unique_ptr<ClientManager> cm(new ClientManager(channel, 10));
+  auto bidi = cm->TestBidi(
+      [&](ggrpc::WritableClient<ggrpctest::BidiRequest>* bidi) {
+        // ここでシャットダウンしてもちゃんと動くか
+        bidi->Shutdown();
+      },
+      [](ggrpctest::BidiResponse resp) {
+        SPDLOG_ERROR("received BidiResponse {}", resp.DebugString());
+      },
+      [](grpc::Status status) {
+        SPDLOG_ERROR("gRPC Error: {}", status.error_message());
+      },
+      [](ggrpc::ClientReaderWriterError error) {
+        SPDLOG_ERROR("ClientReaderWriterError: {}", (int)error);
+      });
+  std::this_thread::sleep_for(std::chrono::seconds(1));
+}
 int main() {
   spdlog::set_level(spdlog::level::trace);
+
+  test_client_bidi_connect_callback();
 
   std::unique_ptr<TestServer> server(new TestServer());
   server->Start("0.0.0.0:50051", 10);
