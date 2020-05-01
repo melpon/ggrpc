@@ -6,7 +6,7 @@ syntax = "proto3";
 // option objc_class_prefix = "HLW";
 option cc_enable_arenas = true;
 
-package ggrpctest;
+package gg;
 
 service Test {
   rpc Unary(UnaryRequest) returns (UnaryResponse) {}

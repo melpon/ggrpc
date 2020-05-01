@@ -14,53 +14,52 @@
 #include "ggrpc.pb.h"
 
 class TestUnaryHandler
-    : public ggrpc::ServerResponseWriterHandler<ggrpctest::UnaryResponse,
-                                                ggrpctest::UnaryRequest> {
-  ggrpctest::Test::AsyncService* service_;
+    : public ggrpc::ServerResponseWriterHandler<gg::UnaryResponse,
+                                                gg::UnaryRequest> {
+  gg::Test::AsyncService* service_;
 
  public:
-  TestUnaryHandler(ggrpctest::Test::AsyncService* service)
-      : service_(service) {}
-  void Request(grpc::ServerContext* context, ggrpctest::UnaryRequest* request,
-               grpc::ServerAsyncResponseWriter<ggrpctest::UnaryResponse>*
-                   response_writer,
-               grpc::ServerCompletionQueue* cq, void* tag) override {
+  TestUnaryHandler(gg::Test::AsyncService* service) : service_(service) {}
+  void Request(
+      grpc::ServerContext* context, gg::UnaryRequest* request,
+      grpc::ServerAsyncResponseWriter<gg::UnaryResponse>* response_writer,
+      grpc::ServerCompletionQueue* cq, void* tag) override {
     service_->RequestUnary(context, request, response_writer, cq, cq, tag);
   }
-  void OnAccept(ggrpctest::UnaryRequest request) override {
+  void OnAccept(gg::UnaryRequest request) override {
     SPDLOG_TRACE("received UnaryRequest: {}", request.DebugString());
-    ggrpctest::UnaryResponse resp;
+    gg::UnaryResponse resp;
     resp.set_value(request.value() * 100);
     Finish(resp, grpc::Status::OK);
   }
 };
 
 class TestBidiHandler
-    : public ggrpc::ServerReaderWriterHandler<ggrpctest::BidiResponse,
-                                              ggrpctest::BidiRequest> {
-  ggrpctest::Test::AsyncService* service_;
+    : public ggrpc::ServerReaderWriterHandler<gg::BidiResponse,
+                                              gg::BidiRequest> {
+  gg::Test::AsyncService* service_;
 
  public:
-  TestBidiHandler(ggrpctest::Test::AsyncService* service) : service_(service) {}
+  TestBidiHandler(gg::Test::AsyncService* service) : service_(service) {}
   void Request(grpc::ServerContext* context,
-               grpc::ServerAsyncReaderWriter<ggrpctest::BidiResponse,
-                                             ggrpctest::BidiRequest>* streamer,
+               grpc::ServerAsyncReaderWriter<gg::BidiResponse, gg::BidiRequest>*
+                   streamer,
                grpc::ServerCompletionQueue* cq, void* tag) override {
     service_->RequestBidi(context, streamer, cq, cq, tag);
   }
   void OnAccept() override {
-    ggrpctest::BidiResponse resp;
+    gg::BidiResponse resp;
     resp.set_value(1);
     Write(resp);
   }
-  void OnRead(ggrpctest::BidiRequest req) override {
+  void OnRead(gg::BidiRequest req) override {
     SPDLOG_TRACE("received BidiRequest {}", req.DebugString());
-    ggrpctest::BidiResponse resp;
+    gg::BidiResponse resp;
     resp.set_value(2);
     Write(resp);
   }
   void OnReadDoneOrError() override {
-    ggrpctest::BidiResponse resp;
+    gg::BidiResponse resp;
     resp.set_value(3);
     Write(resp);
     Finish(grpc::Status::OK);
@@ -68,7 +67,7 @@ class TestBidiHandler
 };
 
 class TestServer {
-  ggrpctest::Test::AsyncService service_;
+  gg::Test::AsyncService service_;
   ggrpc::Server server_;
 
  public:
@@ -87,39 +86,34 @@ class TestServer {
   }
 };
 
-typedef ggrpc::ClientResponseReader<ggrpctest::UnaryRequest,
-                                    ggrpctest::UnaryResponse>
+typedef ggrpc::ClientResponseReader<gg::UnaryRequest, gg::UnaryResponse>
     UnaryClient;
-typedef ggrpc::ClientReaderWriter<ggrpctest::BidiRequest,
-                                  ggrpctest::BidiResponse>
-    BidiClient;
+typedef ggrpc::ClientReaderWriter<gg::BidiRequest, gg::BidiResponse> BidiClient;
 
 class TestClientManager {
   ggrpc::ClientManager cm_;
-  std::unique_ptr<ggrpctest::Test::Stub> stub_;
+  std::unique_ptr<gg::Test::Stub> stub_;
 
  public:
   TestClientManager(std::shared_ptr<grpc::Channel> channel, int threads)
-      : cm_(10), stub_(ggrpctest::Test::NewStub(channel)) {}
+      : cm_(10), stub_(gg::Test::NewStub(channel)) {}
   void Start() { cm_.Start(); }
 
   std::shared_ptr<UnaryClient> CreateUnary() {
-    return cm_.CreateResponseReader<ggrpctest::UnaryRequest,
-                                    ggrpctest::UnaryResponse>(
+    return cm_.CreateResponseReader<gg::UnaryRequest, gg::UnaryResponse>(
         [stub = stub_.get()](grpc::ClientContext* context,
-                             const ggrpctest::UnaryRequest& request,
+                             const gg::UnaryRequest& request,
                              grpc::CompletionQueue* cq) {
           return stub->AsyncUnary(context, request, cq);
         });
   }
 
   std::shared_ptr<BidiClient> CreateBidi() {
-    return cm_
-        .CreateReaderWriter<ggrpctest::BidiRequest, ggrpctest::BidiResponse>(
-            [stub = stub_.get()](grpc::ClientContext* context,
-                                 grpc::CompletionQueue* cq, void* tag) {
-              return stub->AsyncBidi(context, cq, tag);
-            });
+    return cm_.CreateReaderWriter<gg::BidiRequest, gg::BidiResponse>(
+        [stub = stub_.get()](grpc::ClientContext* context,
+                             grpc::CompletionQueue* cq, void* tag) {
+          return stub->AsyncBidi(context, cq, tag);
+        });
   }
 };
 
@@ -145,12 +139,12 @@ void test_client_bidi_connect_callback() {
   {
     auto bidi = cm.CreateBidi();
     bidi->SetOnConnect([bidi]() {});
-    bidi->SetOnRead([bidi](const ggrpctest::BidiResponse& resp) {
+    bidi->SetOnRead([bidi](const gg::BidiResponse& resp) {
       SPDLOG_INFO("response: {}", resp.DebugString());
       bidi->Shutdown();
     });
     bidi->Connect();
-    ggrpctest::BidiRequest req;
+    gg::BidiRequest req;
     req.set_value(100);
     bidi->Write(req);
     bidi->WritesDone();
@@ -161,12 +155,12 @@ void test_client_bidi_connect_callback() {
   {
     auto bidi = cm.CreateBidi();
     bidi->SetOnConnect([bidi]() {
-      ggrpctest::BidiRequest req;
+      gg::BidiRequest req;
       req.set_value(100);
       bidi->Write(req);
       bidi->WritesDone();
     });
-    bidi->SetOnRead([bidi](const ggrpctest::BidiResponse& resp) {
+    bidi->SetOnRead([bidi](const gg::BidiResponse& resp) {
       SPDLOG_INFO("response: {}", resp.DebugString());
       bidi->Shutdown();
     });
@@ -189,7 +183,7 @@ int main() {
   //std::unique_ptr<ClientManager> cm(new ClientManager(channel, 10));
   //auto bidi = cm->TestBidi(
   //    []() { SPDLOG_TRACE("connected BidiTest"); },
-  //    [](ggrpctest::BidiResponse resp) {
+  //    [](gg::BidiResponse resp) {
   //      SPDLOG_TRACE("received BidiResponse {}", resp.DebugString());
   //    },
   //    [](grpc::Status status) {
@@ -199,7 +193,7 @@ int main() {
   //      SPDLOG_TRACE("ClientReaderWriterError: {}", (int)error);
   //    });
   //std::this_thread::sleep_for(std::chrono::seconds(1));
-  //ggrpctest::BidiRequest req;
+  //gg::BidiRequest req;
   //req.set_value(100);
   //bidi->Write(req);
   //bidi->WritesDone();
@@ -222,11 +216,11 @@ int main() {
   //alarm.reset();
   //std::this_thread::sleep_for(std::chrono::seconds(1));
 
-  //ggrpctest::UnaryRequest unary_req;
+  //gg::UnaryRequest unary_req;
   //unary_req.set_value(1);
   //auto unary = cm->TestUnary(
   //    unary_req,
-  //    [](ggrpctest::UnaryResponse resp, grpc::Status status) {
+  //    [](gg::UnaryResponse resp, grpc::Status status) {
   //      SPDLOG_TRACE("received UnaryResponse {}", resp.DebugString());
   //    },
   //    [](ggrpc::ClientResponseReaderError error) {
