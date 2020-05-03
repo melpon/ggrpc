@@ -28,6 +28,7 @@ class TestUnaryHandler
   }
   void OnAccept(gg::UnaryRequest request) override {
     SPDLOG_TRACE("received UnaryRequest: {}", request.DebugString());
+    std::this_thread::sleep_for(std::chrono::seconds(1));
     gg::UnaryResponse resp;
     resp.set_value(request.value() * 100);
     Finish(resp, grpc::Status::OK);
@@ -130,7 +131,7 @@ void test_client_bidi_connect_callback() {
 
   {
     auto bidi = cm.CreateBidi();
-    bidi->SetOnConnect([bidi]() { bidi->Shutdown(); });
+    bidi->SetOnConnect([bidi]() { bidi->Close(); });
     bidi->Connect();
     bidi.reset();
     std::this_thread::sleep_for(std::chrono::seconds(1));
@@ -141,7 +142,7 @@ void test_client_bidi_connect_callback() {
     bidi->SetOnConnect([bidi]() {});
     bidi->SetOnRead([bidi](const gg::BidiResponse& resp) {
       SPDLOG_INFO("response: {}", resp.DebugString());
-      bidi->Shutdown();
+      bidi->Close();
     });
     bidi->Connect();
     gg::BidiRequest req;
@@ -162,18 +163,57 @@ void test_client_bidi_connect_callback() {
     });
     bidi->SetOnRead([bidi](const gg::BidiResponse& resp) {
       SPDLOG_INFO("response: {}", resp.DebugString());
-      bidi->Shutdown();
+      bidi->Close();
     });
     bidi->Connect();
     bidi.reset();
     std::this_thread::sleep_for(std::chrono::seconds(1));
   }
+
+  {
+    auto bidi = cm.CreateBidi();
+    bidi->SetOnConnect([bidi]() {});
+    bidi->Connect();
+  }
 }
+
+void test_client_unary() {
+  TestServer server;
+  server.Start("0.0.0.0:50051", 10);
+  std::this_thread::sleep_for(std::chrono::seconds(1));
+
+  auto channel = grpc::CreateChannel("localhost:50051",
+                                     grpc::InsecureChannelCredentials());
+  TestClientManager cm(channel, 10);
+  cm.Start();
+
+  gg::UnaryRequest req;
+
+  {
+    auto unary = cm.CreateUnary();
+    req.set_value(100);
+    unary->SetOnResponse(
+        [unary](gg::UnaryResponse resp, grpc::Status) { unary->Close(); });
+    unary->Request(req);
+    unary.reset();
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+  }
+
+  {
+    auto unary = cm.CreateUnary();
+    req.set_value(100);
+    unary->SetOnResponse(
+        [unary](gg::UnaryResponse resp, grpc::Status) { unary->Close(); });
+    unary->Request(req);
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+  }
+}
+
 int main() {
   spdlog::set_level(spdlog::level::trace);
 
   test_client_bidi_connect_callback();
-
+  test_client_unary();
   //std::unique_ptr<TestServer> server(new TestServer());
   //server->Start("0.0.0.0:50051", 10);
   //std::this_thread::sleep_for(std::chrono::seconds(1));

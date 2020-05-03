@@ -58,27 +58,21 @@ class ClientResponseReader {
   R response_;
   grpc::Status grpc_status_;
 
-  bool shutdown_ = false;
-  bool done_ = false;
+  enum class Status { INIT, REQUESTING, CANCELING, DONE };
+  Status status_ = Status::INIT;
+  bool release_ = false;
+  bool releasing_ = false;
   std::mutex mutex_;
 
-  std::function<bool()> shutdown_requested_;
   grpc::CompletionQueue* cq_;
 
   RequestFunc request_;
   OnResponseFunc on_response_;
   OnErrorFunc on_error_;
 
-  bool running_callback_ = false;
-
  public:
-  ClientResponseReader(grpc::CompletionQueue* cq,
-                       std::function<bool()> shutdown_requested,
-                       RequestFunc request)
-      : reader_thunk_(this),
-        cq_(cq),
-        shutdown_requested_(std::move(shutdown_requested)),
-        request_(std::move(request)) {}
+  ClientResponseReader(grpc::CompletionQueue* cq, RequestFunc request)
+      : reader_thunk_(this), cq_(cq), request_(std::move(request)) {}
 
   ~ClientResponseReader() { SPDLOG_TRACE("[0x{}] deleted", (void*)this); }
 
@@ -90,108 +84,136 @@ class ClientResponseReader {
 
   void SetOnResponse(OnResponseFunc on_response) {
     std::lock_guard<std::mutex> guard(mutex_);
-    SPDLOG_TRACE("SetOnResponse start");
-    if (shutdown_ || shutdown_requested_()) {
-      SPDLOG_TRACE("SetOnResponse shutdown requested");
+    if (status_ == Status::DONE) {
       return;
     }
     on_response_ = std::move(on_response);
-    SPDLOG_TRACE("SetOnResponse end");
   }
   void SetOnError(OnErrorFunc on_error) {
     std::lock_guard<std::mutex> guard(mutex_);
-    if (shutdown_ || shutdown_requested_()) {
+    if (status_ != Status::INIT) {
       return;
     }
-    on_error_ = std::move(on_error_);
+    on_error_ = std::move(on_error);
   }
 
   void Request(const W& request) {
     std::lock_guard<std::mutex> guard(mutex_);
+    if (status_ != Status::INIT) {
+      return;
+    }
+    status_ = Status::REQUESTING;
+
     reader_ = request_(&context_, request, cq_);
     reader_->Finish(&response_, &grpc_status_, &reader_thunk_);
   }
 
-  void Shutdown() {
+  void Release() {
     std::unique_ptr<ClientResponseReader> p;
-    std::lock_guard<std::mutex> guard(mutex_);
+    std::unique_lock<std::mutex> lock(mutex_);
 
-    if (shutdown_ || shutdown_requested_()) {
+    DoClose(p, lock);
+
+    release_ = true;
+  }
+
+  void Close() {
+    std::unique_ptr<ClientResponseReader> p;
+    std::unique_lock<std::mutex> lock(mutex_);
+
+    DoClose(p, lock);
+  }
+
+ private:
+  void DoClose(std::unique_ptr<ClientResponseReader>& p,
+               std::unique_lock<std::mutex>& lock) {
+    if (status_ == Status::REQUESTING) {
+      context_.TryCancel();
+      status_ = Status::CANCELING;
       return;
     }
-    shutdown_ = true;
 
-    on_response_ = nullptr;
-    on_error_ = nullptr;
-
-    if (!done_) {
-      // キャンセルされるまで待つ
-      context_.TryCancel();
+    if (status_ == Status::CANCELING) {
+      return;
     }
 
-    if (Deletable()) {
+    status_ = Status::DONE;
+    Finish(p, lock);
+  }
+
+  void Finish(std::unique_ptr<ClientResponseReader>& p,
+              std::unique_lock<std::mutex>& lock) {
+    if (status_ != Status::DONE) {
+      return;
+    }
+
+    if (releasing_) {
+      return;
+    }
+
+    auto on_response = std::move(on_response_);
+    auto on_error = std::move(on_error_);
+
+    releasing_ = true;
+    lock.unlock();
+    on_response = nullptr;
+    on_error = nullptr;
+    lock.lock();
+    releasing_ = false;
+
+    if (release_) {
       p.reset(this);
     }
   }
 
  private:
   template <class F, class... Args>
-  void RunCallbackOnce(std::unique_lock<std::mutex>& lock, F& f,
-                       Args&&... args) {
-    // 呼び出した後に f が無効になるバージョン。
-    // f に自身の shared_ptr がバインドされている場合、無効にした時点で
-    // Shutdown が呼ばれる可能性があり、ロック中に Shutdown するとデッドロックするので
-    // アンロック中に f を無効にする必要がある。
+  void RunCallback(std::unique_lock<std::mutex>& lock, std::string funcname,
+                   F f, Args&&... args) {
+    // 普通にコールバックするとデッドロックの可能性があるので
+    // unlock してからコールバックする。
+    // 再度ロックした時に状態が変わってる可能性があるので注意すること。
     if (f) {
-      auto g = std::move(f);
-      running_callback_ = true;
       lock.unlock();
       try {
-        g(std::forward<Args>(args)...);
-        g = nullptr;
-        lock.lock();
-        running_callback_ = false;
+        f(std::forward<Args>(args)...);
+      } catch (std::exception& e) {
+        SPDLOG_ERROR("{} error: what={}", funcname, e.what());
       } catch (...) {
-        lock.lock();
-        running_callback_ = false;
+        SPDLOG_ERROR("{} error", funcname);
       }
+      f = nullptr;
+      lock.lock();
     }
   }
 
   void ProceedToRead(bool ok) {
     std::unique_ptr<ClientResponseReader> p;
     std::unique_lock<std::mutex> lock(mutex_);
-    SPDLOG_TRACE("[0x{}] ProceedToRead: ok={}", (void*)this, ok);
+    SPDLOG_TRACE("[0x{}] ProceedToRead: ok={} status={} grpc_status={}",
+                 (void*)this, ok, (int)status_, grpc_status_.error_message());
 
-    done_ = true;
+    assert(status_ == Status::REQUESTING || status_ == Status::CANCELING);
 
-    if (shutdown_ || shutdown_requested_()) {
-      SPDLOG_INFO("shutdown ClientResponseReader");
-      if (Deletable()) {
-        p.reset(this);
-      }
-      return;
-    }
+    auto st = status_;
+    status_ = Status::DONE;
 
     if (!ok) {
       SPDLOG_ERROR("finishing error");
-      RunCallbackOnce(lock, on_error_, ClientResponseWriterError::FINISH);
-      if (Deletable()) {
-        p.reset(this);
+      if (st == Status::REQUESTING) {
+        RunCallback(lock, "OnError", on_error_,
+                    ClientResponseWriterError::FINISH);
       }
+      Finish(p, lock);
       return;
     }
 
     // 結果が取得できた
-    RunCallbackOnce(lock, on_response_, std::move(response_),
-                    std::move(grpc_status_));
-    if (Deletable()) {
-      p.reset(this);
+    if (st == Status::REQUESTING) {
+      RunCallback(lock, "OnResponse", on_response_, std::move(response_),
+                  std::move(grpc_status_));
     }
-  }
-
-  bool Deletable() {
-    return (shutdown_ || shutdown_requested_()) && !running_callback_ && done_;
+    Finish(p, lock);
   }
 };
 
@@ -238,20 +260,35 @@ class ClientReaderWriter {
   grpc::ClientContext context_;
   std::unique_ptr<grpc::ClientAsyncReaderWriter<W, R>> streamer_;
 
-  enum class ReadStatus { CONNECTING, READING, FINISHING, FINISHED };
-  ReadStatus read_status_ = ReadStatus::FINISHED;
-  enum class WriteStatus { CONNECTING, WRITING, IDLE, FINISHING, FINISHED };
-  WriteStatus write_status_ = WriteStatus::FINISHED;
+  enum class ReadStatus {
+    INIT,
+    CONNECTING,
+    READING,
+    FINISHING,
+    CANCELING,
+    FINISHED
+  };
+  ReadStatus read_status_ = ReadStatus::INIT;
+  enum class WriteStatus {
+    INIT,
+    CONNECTING,
+    WRITING,
+    IDLE,
+    FINISHING,
+    CANCELING,
+    FINISHED
+  };
+  WriteStatus write_status_ = WriteStatus::INIT;
 
   std::deque<std::shared_ptr<void>> request_queue_;
   R response_;
 
   grpc::Status grpc_status_;
 
-  bool shutdown_ = false;
+  bool release_ = false;
+  bool releasing_ = false;
   std::mutex mutex_;
 
-  std::function<bool()> shutdown_requested_;
   grpc::CompletionQueue* cq_;
   ConnectFunc connect_;
   OnConnectFunc on_connect_;
@@ -260,17 +297,13 @@ class ClientReaderWriter {
   OnErrorFunc on_error_;
   OnWritesDoneFunc on_writes_done_;
 
-  bool running_callback_ = false;
-
  public:
   ClientReaderWriter(grpc::CompletionQueue* cq,
-                     std::function<bool()> shutdown_requested,
                      ConnectFunc connect)
       : connector_thunk_(this),
         reader_thunk_(this),
         writer_thunk_(this),
         cq_(cq),
-        shutdown_requested_(std::move(shutdown_requested)),
         connect_(std::move(connect)) {}
 
   ~ClientReaderWriter() { SPDLOG_TRACE("[0x{}] deleted", (void*)this); }
@@ -283,35 +316,40 @@ class ClientReaderWriter {
 
   void SetOnConnect(OnConnectFunc on_connect) {
     std::lock_guard<std::mutex> guard(mutex_);
-    if (shutdown_ || shutdown_requested_()) {
+    if (read_status_ != ReadStatus::INIT ||
+        write_status_ != WriteStatus::INIT) {
       return;
     }
     on_connect_ = std::move(on_connect);
   }
   void SetOnRead(OnReadFunc on_read) {
     std::lock_guard<std::mutex> guard(mutex_);
-    if (shutdown_ || shutdown_requested_()) {
+    if (read_status_ != ReadStatus::INIT ||
+        write_status_ != WriteStatus::INIT) {
       return;
     }
     on_read_ = std::move(on_read);
   }
   void SetOnReadDone(OnReadDoneFunc on_read_done) {
     std::lock_guard<std::mutex> guard(mutex_);
-    if (shutdown_ || shutdown_requested_()) {
+    if (read_status_ != ReadStatus::INIT ||
+        write_status_ != WriteStatus::INIT) {
       return;
     }
     on_read_done_ = std::move(on_read_done);
   }
   void SetOnWritesDone(OnWritesDoneFunc on_writes_done) {
     std::lock_guard<std::mutex> guard(mutex_);
-    if (shutdown_ || shutdown_requested_()) {
+    if (read_status_ != ReadStatus::INIT ||
+        write_status_ != WriteStatus::INIT) {
       return;
     }
     on_writes_done_ = std::move(on_writes_done);
   }
   void SetOnError(OnErrorFunc on_error) {
     std::lock_guard<std::mutex> guard(mutex_);
-    if (shutdown_ || shutdown_requested_()) {
+    if (read_status_ != ReadStatus::INIT ||
+        write_status_ != WriteStatus::INIT) {
       return;
     }
     on_error_ = std::move(on_error_);
@@ -319,26 +357,34 @@ class ClientReaderWriter {
 
   void Connect() {
     std::lock_guard<std::mutex> guard(mutex_);
+    if (read_status_ != ReadStatus::INIT ||
+        write_status_ != WriteStatus::INIT) {
+      return;
+    }
     read_status_ = ReadStatus::CONNECTING;
     write_status_ = WriteStatus::CONNECTING;
     streamer_ = connect_(&context_, cq_, &connector_thunk_);
   }
 
-  void Shutdown() {
+  void Release() {
     std::unique_ptr<ClientReaderWriter> p;
-    std::lock_guard<std::mutex> guard(mutex_);
+    std::unique_lock<std::mutex> lock(mutex_);
 
-    if (shutdown_ || shutdown_requested_()) {
-      return;
-    }
-    shutdown_ = true;
+    release_ = true;
 
-    on_connect_ = nullptr;
-    on_read_ = nullptr;
-    on_read_done_ = nullptr;
-    on_writes_done_ = nullptr;
-    on_error_ = nullptr;
+    DoClose(p, lock);
+  }
 
+  void Close() {
+    std::unique_ptr<ClientReaderWriter> p;
+    std::unique_lock<std::mutex> lock(mutex_);
+
+    DoClose(p, lock);
+  }
+
+ private:
+  void DoClose(std::unique_ptr<ClientReaderWriter>& p,
+               std::unique_lock<std::mutex>& lock) {
     // 読み書き中だったらキャンセルされるまで待つ
     if (read_status_ == ReadStatus::CONNECTING ||
         read_status_ == ReadStatus::READING ||
@@ -347,30 +393,72 @@ class ClientReaderWriter {
         write_status_ == WriteStatus::WRITING ||
         write_status_ == WriteStatus::FINISHING) {
       context_.TryCancel();
-    } else {
-      // そうでないなら即座に終わらせて良い
-      read_status_ = ReadStatus::FINISHED;
-      write_status_ = WriteStatus::FINISHED;
+      if (read_status_ == ReadStatus::CONNECTING ||
+          read_status_ == ReadStatus::READING ||
+          read_status_ == ReadStatus::FINISHING) {
+        read_status_ = ReadStatus::CANCELING;
+      }
+      if (write_status_ == WriteStatus::CONNECTING ||
+          write_status_ == WriteStatus::WRITING ||
+          write_status_ == WriteStatus::FINISHING) {
+        write_status_ = WriteStatus::CANCELING;
+      }
+      return;
     }
-    if (Deletable()) {
+
+    if (read_status_ == ReadStatus::CANCELING ||
+        write_status_ == WriteStatus::CANCELING) {
+      return;
+    }
+
+    read_status_ = ReadStatus::FINISHED;
+    write_status_ = WriteStatus::FINISHED;
+    Finish(p, lock);
+  }
+
+  void Finish(std::unique_ptr<ClientReaderWriter>& p,
+              std::unique_lock<std::mutex>& lock) {
+    if (read_status_ != ReadStatus::FINISHED ||
+        write_status_ != WriteStatus::FINISHED) {
+      return;
+    }
+    if (releasing_) {
+      return;
+    }
+
+    auto on_connect = std::move(on_connect_);
+    auto on_read = std::move(on_read_);
+    auto on_read_done = std::move(on_read_done_);
+    auto on_writes_done = std::move(on_writes_done_);
+    auto on_error = std::move(on_error_);
+
+    releasing_ = true;
+    lock.unlock();
+    on_connect = nullptr;
+    on_read = nullptr;
+    on_read_done = nullptr;
+    on_writes_done = nullptr;
+    on_error = nullptr;
+    lock.lock();
+    releasing_ = false;
+
+    if (release_) {
       p.reset(this);
     }
   }
 
+ public:
   void Write(W request) {
     std::lock_guard<std::mutex> guard(mutex_);
     SPDLOG_TRACE("[0x{}] Write: request={}", (void*)this,
                  request.DebugString());
 
-    if (shutdown_ || shutdown_requested_()) {
-      return;
-    }
-
     if (write_status_ == WriteStatus::IDLE) {
       streamer_->Write(request, &writer_thunk_);
       write_status_ = WriteStatus::WRITING;
-    } else if (write_status_ == WriteStatus::WRITING ||
-               write_status_ == WriteStatus::CONNECTING) {
+    } else if (write_status_ == WriteStatus::INIT ||
+               write_status_ == WriteStatus::CONNECTING ||
+               write_status_ == WriteStatus::WRITING) {
       request_queue_.push_back(
           std::shared_ptr<void>(new W(std::move(request))));
     }
@@ -379,40 +467,34 @@ class ClientReaderWriter {
   void WritesDone() {
     std::lock_guard<std::mutex> guard(mutex_);
 
-    if (shutdown_ || shutdown_requested_()) {
-      return;
-    }
-
     if (write_status_ == WriteStatus::IDLE) {
       streamer_->WritesDone(&writer_thunk_);
       write_status_ = WriteStatus::FINISHING;
-    } else if (write_status_ == WriteStatus::WRITING ||
-               write_status_ == WriteStatus::CONNECTING) {
+    } else if (write_status_ == WriteStatus::INIT ||
+               write_status_ == WriteStatus::CONNECTING ||
+               write_status_ == WriteStatus::WRITING) {
       request_queue_.push_back(nullptr);
     }
   }
 
  private:
   template <class F, class... Args>
-  void RunCallback(std::unique_lock<std::mutex>& lock, F f, Args&&... args) {
+  void RunCallback(std::unique_lock<std::mutex>& lock, std::string funcname,
+                   F f, Args&&... args) {
     // 普通にコールバックするとデッドロックの可能性があるので
     // unlock してからコールバックする。
     // 再度ロックした時に状態が変わってる可能性があるので注意すること。
     if (f) {
-      running_callback_ = true;
       lock.unlock();
       try {
         f(std::forward<Args>(args)...);
-        // f に自身の shared_ptr がバインドされていて、コールバック中に SetOn〜 で nullptr が渡されてた場合、
-        // RunCallback を抜ける時に Shutdown が呼ばれる可能性があり、ロック中に Shutdown するとデッドロックするので
-        // アンロック中に f を無効にする必要がある。
-        f = nullptr;
-        lock.lock();
-        running_callback_ = false;
+      } catch (std::exception& e) {
+        SPDLOG_ERROR("{} error: what={}", funcname, e.what());
       } catch (...) {
-        lock.lock();
-        running_callback_ = false;
+        SPDLOG_ERROR("{} error", funcname);
       }
+      f = nullptr;
+      lock.lock();
     }
   }
 
@@ -421,36 +503,27 @@ class ClientReaderWriter {
     std::unique_lock<std::mutex> lock(mutex_);
     SPDLOG_TRACE("[0x{}] ProceedToConnect: ok={}", (void*)this, ok);
 
-    if (shutdown_ || shutdown_requested_()) {
-      read_status_ = ReadStatus::FINISHED;
-      write_status_ = WriteStatus::FINISHED;
-      if (Deletable()) {
-        p.reset(this);
-      }
+    // read/write 両方が CONNECTING か CANCELING になることしか無いはず
+    assert(read_status_ == ReadStatus::CONNECTING &&
+               write_status_ == WriteStatus::CONNECTING ||
+           read_status_ == ReadStatus::CANCELING &&
+               write_status_ == WriteStatus::CANCELING);
+
+    if (read_status_ != ReadStatus::CONNECTING ||
+        write_status_ != WriteStatus::CONNECTING) {
+      // 既に Close が呼ばれてるので終わる
+      Finish(p, lock);
       return;
     }
 
+    // 接続失敗
     if (!ok) {
       SPDLOG_ERROR("connection error");
 
       read_status_ = ReadStatus::FINISHED;
       write_status_ = WriteStatus::FINISHED;
-      RunCallback(lock, on_error_, ClientReaderWriterError::CONNECT);
-      if (Deletable()) {
-        p.reset(this);
-      }
-      return;
-    }
-
-    RunCallback(lock, on_connect_);
-
-    // 終了要求が来てたので読み込みをせずに終了
-    if (shutdown_ || shutdown_requested_()) {
-      read_status_ = ReadStatus::FINISHED;
-      write_status_ = WriteStatus::FINISHED;
-      if (Deletable()) {
-        p.reset(this);
-      }
+      RunCallback(lock, "OnError", on_error_, ClientReaderWriterError::CONNECT);
+      Finish(p, lock);
       return;
     }
 
@@ -459,6 +532,8 @@ class ClientReaderWriter {
     read_status_ = ReadStatus::READING;
 
     HandleRequestQueue();
+
+    RunCallback(lock, "OnConnect", on_connect_);
   }
 
   void ProceedToRead(bool ok) {
@@ -466,11 +541,13 @@ class ClientReaderWriter {
     std::unique_lock<std::mutex> lock(mutex_);
     SPDLOG_TRACE("[0x{}] ProceedToRead: ok={}", (void*)this, ok);
 
-    if (shutdown_ || shutdown_requested_()) {
+    assert(read_status_ == ReadStatus::READING ||
+           read_status_ == ReadStatus::FINISHING ||
+           read_status_ == ReadStatus::CANCELING);
+
+    if (read_status_ == ReadStatus::CANCELING) {
       read_status_ = ReadStatus::FINISHED;
-      if (Deletable()) {
-        p.reset(this);
-      }
+      Finish(p, lock);
       return;
     }
 
@@ -481,44 +558,25 @@ class ClientReaderWriter {
         read_status_ = ReadStatus::FINISHING;
       } else if (read_status_ == ReadStatus::FINISHING) {
         SPDLOG_ERROR("reading or finishing error");
-        // 書き込み中ならキャンセルする
-        if (write_status_ == WriteStatus::CONNECTING ||
-            write_status_ == WriteStatus::WRITING ||
-            write_status_ == WriteStatus::FINISHING) {
-          context_.TryCancel();
-        } else {
-          write_status_ = WriteStatus::FINISHED;
-        }
         read_status_ = ReadStatus::FINISHED;
-        RunCallback(lock, on_error_, ClientReaderWriterError::READ);
-        if (Deletable()) {
-          p.reset(this);
-        }
+        RunCallback(lock, "OnError", on_error_, ClientReaderWriterError::READ);
+        Finish(p, lock);
       }
       return;
     }
 
     if (read_status_ == ReadStatus::READING) {
       // 結果が取得できた
-
-      RunCallback(lock, on_read_, std::move(response_));
-
-      // 終了要求が来てたので次の読み込みをせずに終了
-      if (shutdown_ || shutdown_requested_()) {
-        read_status_ = ReadStatus::FINISHED;
-        if (Deletable()) {
-          p.reset(this);
-        }
-        return;
-      }
+      auto resp = std::move(response_);
 
       // 次の読み込み
       streamer_->Read(&response_, &reader_thunk_);
       read_status_ = ReadStatus::READING;
+
+      // 読み込み成功コールバック
+      RunCallback(lock, "OnRead", on_read_, std::move(resp));
     } else if (read_status_ == ReadStatus::FINISHING) {
       // 終了
-
-      RunCallback(lock, on_read_done_, grpc_status_);
 
       if (grpc_status_.ok()) {
         SPDLOG_DEBUG("gRPC Read finished");
@@ -529,9 +587,8 @@ class ClientReaderWriter {
       }
       // 正常終了
       read_status_ = ReadStatus::FINISHED;
-      if (Deletable()) {
-        p.reset(this);
-      }
+      RunCallback(lock, "OnReadDone", on_read_done_, grpc_status_);
+      Finish(p, lock);
     }
   }
 
@@ -540,40 +597,29 @@ class ClientReaderWriter {
     std::unique_lock<std::mutex> lock(mutex_);
     SPDLOG_TRACE("[0x{}] ProceedToWrite: ok={}", (void*)this, ok);
 
-    if (shutdown_ || shutdown_requested_()) {
+    assert(write_status_ == WriteStatus::WRITING ||
+           write_status_ == WriteStatus::FINISHING ||
+           write_status_ == WriteStatus::CANCELING);
+
+    if (write_status_ == WriteStatus::CANCELING) {
       write_status_ = WriteStatus::FINISHED;
-      if (Deletable()) {
-        p.reset(this);
-      }
+      Finish(p, lock);
       return;
     }
 
     if (!ok) {
-      // 読み込み中ならキャンセルする
-      if (read_status_ == ReadStatus::CONNECTING ||
-          read_status_ == ReadStatus::READING ||
-          read_status_ == ReadStatus::FINISHING) {
-        context_.TryCancel();
-      } else {
-        read_status_ = ReadStatus::FINISHED;
-      }
       write_status_ = WriteStatus::FINISHED;
-      RunCallback(lock, on_error_, ClientReaderWriterError::WRITE);
-      if (Deletable()) {
-        p.reset(this);
-      }
+      RunCallback(lock, "OnError", on_error_, ClientReaderWriterError::WRITE);
+      Finish(p, lock);
       return;
     }
 
     if (write_status_ == WriteStatus::FINISHING) {
-      RunCallback(lock, on_writes_done_);
-
       // 書き込み完了。
       // あとは読み込みが全て終了したら終わり。
       write_status_ = WriteStatus::FINISHED;
-      if (Deletable()) {
-        p.reset(this);
-      }
+      RunCallback(lock, "OnWritesDone", on_writes_done_);
+      Finish(p, lock);
       return;
     }
 
@@ -598,12 +644,6 @@ class ClientReaderWriter {
       }
     }
   }
-
-  bool Deletable() const {
-    return (shutdown_ || shutdown_requested_()) && !running_callback_ &&
-           read_status_ == ReadStatus::FINISHED &&
-           write_status_ == WriteStatus::FINISHED;
-  }
 };
 
 class ClientManager {
@@ -616,7 +656,39 @@ class ClientManager {
   std::vector<ThreadData> threads_;
 
   uint32_t next_client_id_ = 0;
-  std::atomic_bool shutdown_{false};
+  bool shutdown_ = false;
+
+  struct Holder {
+    virtual ~Holder() {}
+    virtual void Close() = 0;
+    virtual bool Expired() = 0;
+  };
+  template <class W, class R>
+  struct ResponseReaderHolder : Holder {
+    std::weak_ptr<ClientResponseReader<W, R>> wp;
+    ResponseReaderHolder(std::shared_ptr<ClientResponseReader<W, R>> p)
+        : wp(p) {}
+    void Close() override {
+      auto sp = wp.lock();
+      if (sp) {
+        sp->Close();
+      }
+    }
+    bool Expired() override { return wp.expired(); }
+  };
+  template <class W, class R>
+  struct ReaderWriterHolder : Holder {
+    std::weak_ptr<ClientReaderWriter<W, R>> wp;
+    ReaderWriterHolder(std::shared_ptr<ClientReaderWriter<W, R>> p) : wp(p) {}
+    void Close() override {
+      auto sp = wp.lock();
+      if (sp) {
+        sp->Close();
+      }
+    }
+    bool Expired() override { return wp.expired(); }
+  };
+  std::vector<std::unique_ptr<Holder>> holders_;
 
  public:
   ClientManager(int threads) : threads_(threads) {}
@@ -625,18 +697,31 @@ class ClientManager {
 
   void Start() {
     for (auto& th : threads_) {
-      th.thread.reset(new std::thread([& cq = th.cq]() {
-        void* got_tag;
-        bool ok = false;
-
-        while (cq.Next(&got_tag, &ok)) {
-          Handler* call = static_cast<Handler*>(got_tag);
-          call->Proceed(ok);
-        }
-      }));
+      th.thread.reset(new std::thread([& cq = th.cq]() { ThreadRun(&cq); }));
     }
   }
 
+ private:
+  static void ThreadRun(grpc::CompletionQueue* cq) {
+    void* got_tag;
+    bool ok = false;
+
+    while (cq->Next(&got_tag, &ok)) {
+      Handler* call = static_cast<Handler*>(got_tag);
+      call->Proceed(ok);
+    }
+  }
+
+  void Collect() {
+    // expired な要素を削除する
+    holders_.erase(std::remove_if(holders_.begin(), holders_.end(),
+                                  [](const std::unique_ptr<Holder>& holder) {
+                                    return holder->Expired();
+                                  }),
+                   holders_.end());
+  }
+
+ public:
   void Shutdown() {
     std::lock_guard<std::mutex> guard(mutex_);
 
@@ -647,18 +732,23 @@ class ClientManager {
 
     SPDLOG_TRACE("ClientManager::Shutdown started");
 
-    // キューを Shutdown して、全てのスレッドが終了するのを待つ
+    for (auto&& holder : holders_) {
+      holder->Close();
+    }
+    holders_.clear();
+
+    SPDLOG_TRACE("ClientManager::Shutdown all client closed");
+
+    // まず通常のキューを Shutdown して、全てのスレッドが終了するのを待つ
     // コールバックの処理で無限ループしてるとかじゃない限りは終了するはず
     for (auto& th : threads_) {
       th.cq.Shutdown();
     }
 
-    SPDLOG_TRACE("ClientManager::Shutdown released completion queue");
+    SPDLOG_TRACE("ClientManager::Shutdown cq shutdown completed");
 
     for (auto& th : threads_) {
-      if (th.thread != nullptr) {
-        th.thread->join();
-      }
+      th.thread->join();
       th.thread = nullptr;
     }
 
@@ -670,13 +760,16 @@ class ClientManager {
       typename ClientResponseReader<W, R>::RequestFunc request) {
     std::lock_guard<std::mutex> guard(mutex_);
 
+    Collect();
+
     auto client_id = next_client_id_++;
     auto cq = &threads_[client_id % threads_.size()].cq;
 
     std::shared_ptr<ClientResponseReader<W, R>> p(
-        new ClientResponseReader<W, R>(
-            cq, [this]() -> bool { return shutdown_; }, std::move(request)),
-        [](ClientResponseReader<W, R>* p) { p->Shutdown(); });
+        new ClientResponseReader<W, R>(cq, std::move(request)),
+        [](ClientResponseReader<W, R>* p) { p->Release(); });
+    holders_.push_back(
+        std::unique_ptr<Holder>(new ResponseReaderHolder<W, R>(p)));
     return p;
   }
 
@@ -685,13 +778,16 @@ class ClientManager {
       typename ClientReaderWriter<W, R>::ConnectFunc connect) {
     std::lock_guard<std::mutex> guard(mutex_);
 
+    Collect();
+
     auto client_id = next_client_id_++;
     auto cq = &threads_[client_id % threads_.size()].cq;
 
     std::shared_ptr<ClientReaderWriter<W, R>> p(
-        new ClientReaderWriter<W, R>(cq, [this]() -> bool { return shutdown_; },
-                                     std::move(connect)),
-        [](ClientReaderWriter<W, R>* p) { p->Shutdown(); });
+        new ClientReaderWriter<W, R>(cq, std::move(connect)),
+        [](ClientReaderWriter<W, R>* p) { p->Release(); });
+    holders_.push_back(
+        std::unique_ptr<Holder>(new ReaderWriterHolder<W, R>(p)));
     return p;
   }
 };
