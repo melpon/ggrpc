@@ -61,7 +61,7 @@ class ClientResponseReader {
   enum class Status { INIT, REQUESTING, CANCELING, DONE };
   Status status_ = Status::INIT;
   bool release_ = false;
-  bool releasing_ = false;
+  int nesting_ = 0;
   std::mutex mutex_;
 
   grpc::CompletionQueue* cq_;
@@ -69,6 +69,22 @@ class ClientResponseReader {
   RequestFunc request_;
   OnResponseFunc on_response_;
   OnErrorFunc on_error_;
+
+  struct SafeDeleter {
+    ClientResponseReader* p;
+    std::unique_lock<std::mutex> lock;
+    SafeDeleter(ClientResponseReader* p) : p(p), lock(p->mutex_) {}
+    ~SafeDeleter() {
+      bool del = p->release_ &&
+                 p->status_ == ClientResponseReader::Status::DONE &&
+                 p->nesting_ == 0;
+      lock.unlock();
+      if (del) {
+        delete p;
+      }
+    }
+  };
+  friend struct SafeDeleter;
 
  public:
   ClientResponseReader(grpc::CompletionQueue* cq, RequestFunc request)
@@ -109,24 +125,21 @@ class ClientResponseReader {
   }
 
   void Release() {
-    std::unique_ptr<ClientResponseReader> p;
-    std::unique_lock<std::mutex> lock(mutex_);
-
-    DoClose(p, lock);
+    SafeDeleter d(this);
 
     release_ = true;
+
+    DoClose(d.lock);
   }
 
   void Close() {
-    std::unique_ptr<ClientResponseReader> p;
-    std::unique_lock<std::mutex> lock(mutex_);
+    SafeDeleter d(this);
 
-    DoClose(p, lock);
+    DoClose(d.lock);
   }
 
  private:
-  void DoClose(std::unique_ptr<ClientResponseReader>& p,
-               std::unique_lock<std::mutex>& lock) {
+  void DoClose(std::unique_lock<std::mutex>& lock) {
     if (status_ == Status::REQUESTING) {
       context_.TryCancel();
       status_ = Status::CANCELING;
@@ -138,32 +151,23 @@ class ClientResponseReader {
     }
 
     status_ = Status::DONE;
-    Finish(p, lock);
+    Done(lock);
   }
 
-  void Finish(std::unique_ptr<ClientResponseReader>& p,
-              std::unique_lock<std::mutex>& lock) {
+  void Done(std::unique_lock<std::mutex>& lock) {
     if (status_ != Status::DONE) {
-      return;
-    }
-
-    if (releasing_) {
       return;
     }
 
     auto on_response = std::move(on_response_);
     auto on_error = std::move(on_error_);
 
-    releasing_ = true;
+    ++nesting_;
     lock.unlock();
     on_response = nullptr;
     on_error = nullptr;
     lock.lock();
-    releasing_ = false;
-
-    if (release_) {
-      p.reset(this);
-    }
+    --nesting_;
   }
 
  private:
@@ -174,6 +178,7 @@ class ClientResponseReader {
     // unlock してからコールバックする。
     // 再度ロックした時に状態が変わってる可能性があるので注意すること。
     if (f) {
+      ++nesting_;
       lock.unlock();
       try {
         f(std::forward<Args>(args)...);
@@ -184,12 +189,12 @@ class ClientResponseReader {
       }
       f = nullptr;
       lock.lock();
+      --nesting_;
     }
   }
 
   void ProceedToRead(bool ok) {
-    std::unique_ptr<ClientResponseReader> p;
-    std::unique_lock<std::mutex> lock(mutex_);
+    SafeDeleter d(this);
     SPDLOG_TRACE("[0x{}] ProceedToRead: ok={} status={} grpc_status={}",
                  (void*)this, ok, (int)status_, grpc_status_.error_message());
 
@@ -201,19 +206,19 @@ class ClientResponseReader {
     if (!ok) {
       SPDLOG_ERROR("finishing error");
       if (st == Status::REQUESTING) {
-        RunCallback(lock, "OnError", on_error_,
+        RunCallback(d.lock, "OnError", on_error_,
                     ClientResponseWriterError::FINISH);
       }
-      Finish(p, lock);
+      Done(d.lock);
       return;
     }
 
     // 結果が取得できた
     if (st == Status::REQUESTING) {
-      RunCallback(lock, "OnResponse", on_response_, std::move(response_),
+      RunCallback(d.lock, "OnResponse", on_response_, std::move(response_),
                   std::move(grpc_status_));
     }
-    Finish(p, lock);
+    Done(d.lock);
   }
 };
 
@@ -280,13 +285,17 @@ class ClientReaderWriter {
   };
   WriteStatus write_status_ = WriteStatus::INIT;
 
-  std::deque<std::shared_ptr<void>> request_queue_;
+  struct RequestData {
+    bool is_done;
+    W request;
+  };
+  std::deque<RequestData> request_queue_;
   R response_;
 
   grpc::Status grpc_status_;
 
   bool release_ = false;
-  bool releasing_ = false;
+  int nesting_ = 0;
   std::mutex mutex_;
 
   grpc::CompletionQueue* cq_;
@@ -297,9 +306,26 @@ class ClientReaderWriter {
   OnErrorFunc on_error_;
   OnWritesDoneFunc on_writes_done_;
 
+  struct SafeDeleter {
+    ClientReaderWriter* p;
+    std::unique_lock<std::mutex> lock;
+    SafeDeleter(ClientReaderWriter* p) : p(p), lock(p->mutex_) {}
+    ~SafeDeleter() {
+      bool del =
+          p->release_ &&
+          p->read_status_ == ClientReaderWriter::ReadStatus::FINISHED &&
+          p->write_status_ == ClientReaderWriter::WriteStatus::FINISHED &&
+          p->nesting_ == 0;
+      lock.unlock();
+      if (del) {
+        delete p;
+      }
+    }
+  };
+  friend struct SafeDeleter;
+
  public:
-  ClientReaderWriter(grpc::CompletionQueue* cq,
-                     ConnectFunc connect)
+  ClientReaderWriter(grpc::CompletionQueue* cq, ConnectFunc connect)
       : connector_thunk_(this),
         reader_thunk_(this),
         writer_thunk_(this),
@@ -367,24 +393,21 @@ class ClientReaderWriter {
   }
 
   void Release() {
-    std::unique_ptr<ClientReaderWriter> p;
-    std::unique_lock<std::mutex> lock(mutex_);
+    SafeDeleter d(this);
 
     release_ = true;
 
-    DoClose(p, lock);
+    DoClose(d.lock);
   }
 
   void Close() {
-    std::unique_ptr<ClientReaderWriter> p;
-    std::unique_lock<std::mutex> lock(mutex_);
+    SafeDeleter d(this);
 
-    DoClose(p, lock);
+    DoClose(d.lock);
   }
 
  private:
-  void DoClose(std::unique_ptr<ClientReaderWriter>& p,
-               std::unique_lock<std::mutex>& lock) {
+  void DoClose(std::unique_lock<std::mutex>& lock) {
     // 読み書き中だったらキャンセルされるまで待つ
     if (read_status_ == ReadStatus::CONNECTING ||
         read_status_ == ReadStatus::READING ||
@@ -393,36 +416,27 @@ class ClientReaderWriter {
         write_status_ == WriteStatus::WRITING ||
         write_status_ == WriteStatus::FINISHING) {
       context_.TryCancel();
-      if (read_status_ == ReadStatus::CONNECTING ||
-          read_status_ == ReadStatus::READING ||
-          read_status_ == ReadStatus::FINISHING) {
-        read_status_ = ReadStatus::CANCELING;
-      }
-      if (write_status_ == WriteStatus::CONNECTING ||
-          write_status_ == WriteStatus::WRITING ||
-          write_status_ == WriteStatus::FINISHING) {
-        write_status_ = WriteStatus::CANCELING;
-      }
-      return;
     }
-
-    if (read_status_ == ReadStatus::CANCELING ||
-        write_status_ == WriteStatus::CANCELING) {
-      return;
+    if (read_status_ == ReadStatus::CONNECTING ||
+        read_status_ == ReadStatus::READING ||
+        read_status_ == ReadStatus::FINISHING) {
+      read_status_ = ReadStatus::CANCELING;
+    } else {
+      read_status_ = ReadStatus::FINISHED;
     }
-
-    read_status_ = ReadStatus::FINISHED;
-    write_status_ = WriteStatus::FINISHED;
-    Finish(p, lock);
+    if (write_status_ == WriteStatus::CONNECTING ||
+        write_status_ == WriteStatus::WRITING ||
+        write_status_ == WriteStatus::FINISHING) {
+      write_status_ = WriteStatus::CANCELING;
+    } else {
+      write_status_ = WriteStatus::FINISHED;
+    }
+    Done(lock);
   }
 
-  void Finish(std::unique_ptr<ClientReaderWriter>& p,
-              std::unique_lock<std::mutex>& lock) {
+  void Done(std::unique_lock<std::mutex>& lock) {
     if (read_status_ != ReadStatus::FINISHED ||
         write_status_ != WriteStatus::FINISHED) {
-      return;
-    }
-    if (releasing_) {
       return;
     }
 
@@ -432,7 +446,7 @@ class ClientReaderWriter {
     auto on_writes_done = std::move(on_writes_done_);
     auto on_error = std::move(on_error_);
 
-    releasing_ = true;
+    ++nesting_;
     lock.unlock();
     on_connect = nullptr;
     on_read = nullptr;
@@ -440,11 +454,7 @@ class ClientReaderWriter {
     on_writes_done = nullptr;
     on_error = nullptr;
     lock.lock();
-    releasing_ = false;
-
-    if (release_) {
-      p.reset(this);
-    }
+    --nesting_;
   }
 
  public:
@@ -459,8 +469,10 @@ class ClientReaderWriter {
     } else if (write_status_ == WriteStatus::INIT ||
                write_status_ == WriteStatus::CONNECTING ||
                write_status_ == WriteStatus::WRITING) {
-      request_queue_.push_back(
-          std::shared_ptr<void>(new W(std::move(request))));
+      RequestData req;
+      req.is_done = false;
+      req.request = std::move(request);
+      request_queue_.push_back(std::move(req));
     }
   }
 
@@ -473,7 +485,9 @@ class ClientReaderWriter {
     } else if (write_status_ == WriteStatus::INIT ||
                write_status_ == WriteStatus::CONNECTING ||
                write_status_ == WriteStatus::WRITING) {
-      request_queue_.push_back(nullptr);
+      RequestData req;
+      req.is_done = true;
+      request_queue_.push_back(std::move(req));
     }
   }
 
@@ -485,6 +499,7 @@ class ClientReaderWriter {
     // unlock してからコールバックする。
     // 再度ロックした時に状態が変わってる可能性があるので注意すること。
     if (f) {
+      ++nesting_;
       lock.unlock();
       try {
         f(std::forward<Args>(args)...);
@@ -495,12 +510,12 @@ class ClientReaderWriter {
       }
       f = nullptr;
       lock.lock();
+      --nesting_;
     }
   }
 
   void ProceedToConnect(bool ok) {
-    std::unique_ptr<ClientReaderWriter> p;
-    std::unique_lock<std::mutex> lock(mutex_);
+    SafeDeleter d(this);
     SPDLOG_TRACE("[0x{}] ProceedToConnect: ok={}", (void*)this, ok);
 
     // read/write 両方が CONNECTING か CANCELING になることしか無いはず
@@ -512,7 +527,7 @@ class ClientReaderWriter {
     if (read_status_ != ReadStatus::CONNECTING ||
         write_status_ != WriteStatus::CONNECTING) {
       // 既に Close が呼ばれてるので終わる
-      Finish(p, lock);
+      Done(d.lock);
       return;
     }
 
@@ -522,8 +537,9 @@ class ClientReaderWriter {
 
       read_status_ = ReadStatus::FINISHED;
       write_status_ = WriteStatus::FINISHED;
-      RunCallback(lock, "OnError", on_error_, ClientReaderWriterError::CONNECT);
-      Finish(p, lock);
+      RunCallback(d.lock, "OnError", on_error_,
+                  ClientReaderWriterError::CONNECT);
+      Done(d.lock);
       return;
     }
 
@@ -533,12 +549,11 @@ class ClientReaderWriter {
 
     HandleRequestQueue();
 
-    RunCallback(lock, "OnConnect", on_connect_);
+    RunCallback(d.lock, "OnConnect", on_connect_);
   }
 
   void ProceedToRead(bool ok) {
-    std::unique_ptr<ClientReaderWriter> p;
-    std::unique_lock<std::mutex> lock(mutex_);
+    SafeDeleter d(this);
     SPDLOG_TRACE("[0x{}] ProceedToRead: ok={}", (void*)this, ok);
 
     assert(read_status_ == ReadStatus::READING ||
@@ -547,20 +562,21 @@ class ClientReaderWriter {
 
     if (read_status_ == ReadStatus::CANCELING) {
       read_status_ = ReadStatus::FINISHED;
-      Finish(p, lock);
+      Done(d.lock);
       return;
     }
 
     if (!ok) {
       if (read_status_ == ReadStatus::READING) {
-        // 正常に finish した可能性があるので Finish する
+        // 正常に読み込み完了した可能性があるので Finish する
         streamer_->Finish(&grpc_status_, &reader_thunk_);
         read_status_ = ReadStatus::FINISHING;
       } else if (read_status_ == ReadStatus::FINISHING) {
         SPDLOG_ERROR("reading or finishing error");
         read_status_ = ReadStatus::FINISHED;
-        RunCallback(lock, "OnError", on_error_, ClientReaderWriterError::READ);
-        Finish(p, lock);
+        RunCallback(d.lock, "OnError", on_error_,
+                    ClientReaderWriterError::READ);
+        Done(d.lock);
       }
       return;
     }
@@ -574,7 +590,7 @@ class ClientReaderWriter {
       read_status_ = ReadStatus::READING;
 
       // 読み込み成功コールバック
-      RunCallback(lock, "OnRead", on_read_, std::move(resp));
+      RunCallback(d.lock, "OnRead", on_read_, std::move(resp));
     } else if (read_status_ == ReadStatus::FINISHING) {
       // 終了
 
@@ -587,14 +603,13 @@ class ClientReaderWriter {
       }
       // 正常終了
       read_status_ = ReadStatus::FINISHED;
-      RunCallback(lock, "OnReadDone", on_read_done_, grpc_status_);
-      Finish(p, lock);
+      RunCallback(d.lock, "OnReadDone", on_read_done_, grpc_status_);
+      Done(d.lock);
     }
   }
 
   void ProceedToWrite(bool ok) {
-    std::unique_ptr<ClientReaderWriter> p;
-    std::unique_lock<std::mutex> lock(mutex_);
+    SafeDeleter d(this);
     SPDLOG_TRACE("[0x{}] ProceedToWrite: ok={}", (void*)this, ok);
 
     assert(write_status_ == WriteStatus::WRITING ||
@@ -603,14 +618,14 @@ class ClientReaderWriter {
 
     if (write_status_ == WriteStatus::CANCELING) {
       write_status_ = WriteStatus::FINISHED;
-      Finish(p, lock);
+      Done(d.lock);
       return;
     }
 
     if (!ok) {
       write_status_ = WriteStatus::FINISHED;
-      RunCallback(lock, "OnError", on_error_, ClientReaderWriterError::WRITE);
-      Finish(p, lock);
+      RunCallback(d.lock, "OnError", on_error_, ClientReaderWriterError::WRITE);
+      Done(d.lock);
       return;
     }
 
@@ -618,8 +633,8 @@ class ClientReaderWriter {
       // 書き込み完了。
       // あとは読み込みが全て終了したら終わり。
       write_status_ = WriteStatus::FINISHED;
-      RunCallback(lock, "OnWritesDone", on_writes_done_);
-      Finish(p, lock);
+      RunCallback(d.lock, "OnWritesDone", on_writes_done_);
+      Done(d.lock);
       return;
     }
 
@@ -631,11 +646,11 @@ class ClientReaderWriter {
     if (request_queue_.empty()) {
       write_status_ = WriteStatus::IDLE;
     } else {
-      auto ptr = request_queue_.front();
+      auto req = std::move(request_queue_.front());
       request_queue_.pop_front();
-      if (ptr != nullptr) {
+      if (!req.is_done) {
         // 通常の書き込みリクエスト
-        streamer_->Write(*std::static_pointer_cast<W>(ptr), &writer_thunk_);
+        streamer_->Write(req.request, &writer_thunk_);
         write_status_ = WriteStatus::WRITING;
       } else {
         // 完了のリクエスト

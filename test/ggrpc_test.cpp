@@ -31,8 +31,9 @@ class TestUnaryHandler
     std::this_thread::sleep_for(std::chrono::seconds(1));
     gg::UnaryResponse resp;
     resp.set_value(request.value() * 100);
-    Finish(resp, grpc::Status::OK);
+    Context()->Finish(resp, grpc::Status::OK);
   }
+  void OnError(ggrpc::ServerResponseWriterError error) {}
 };
 
 class TestBidiHandler
@@ -209,11 +210,19 @@ void test_client_unary() {
   }
 }
 
+void test_server() {
+  TestServer server;
+  server.Start("0.0.0.0:50051", 1);
+  std::this_thread::sleep_for(std::chrono::seconds(1));
+}
+
 int main() {
   spdlog::set_level(spdlog::level::trace);
 
   test_client_bidi_connect_callback();
   test_client_unary();
+  test_server();
+
   //std::unique_ptr<TestServer> server(new TestServer());
   //server->Start("0.0.0.0:50051", 10);
   //std::this_thread::sleep_for(std::chrono::seconds(1));
