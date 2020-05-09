@@ -24,6 +24,8 @@
 
 namespace ggrpc {
 
+class ClientManager;
+
 enum class ClientResponseWriterError {
   FINISH,
 };
@@ -124,6 +126,7 @@ class ClientResponseReader {
     reader_->Finish(&response_, &grpc_status_, &reader_thunk_);
   }
 
+ private:
   void Release() {
     SafeDeleter d(this);
 
@@ -131,7 +134,9 @@ class ClientResponseReader {
 
     DoClose(d.lock);
   }
+  friend class ClientManager;
 
+ public:
   void Close() {
     SafeDeleter d(this);
 
@@ -392,6 +397,7 @@ class ClientReaderWriter {
     streamer_ = connect_(&context_, cq_, &connector_thunk_);
   }
 
+ private:
   void Release() {
     SafeDeleter d(this);
 
@@ -399,7 +405,9 @@ class ClientReaderWriter {
 
     DoClose(d.lock);
   }
+  friend class ClientManager;
 
+ public:
   void Close() {
     SafeDeleter d(this);
 

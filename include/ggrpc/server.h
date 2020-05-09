@@ -25,6 +25,8 @@
 
 namespace ggrpc {
 
+class Server;
+
 enum class ServerResponseWriterError {
   WRITE,
 };
@@ -128,23 +130,22 @@ class ServerResponseWriterHandler {
     SPDLOG_TRACE("[0x{}] delete ServerResponseWriterHandler", (void*)this);
   }
 
+ private:
   // ServerResponseWriterContext への参照が消えると自身の Release() が呼ばれるように仕込む
   // Close() や Finish() を呼ぶと自身の持つ context は nullptr になる
   // 誰かが参照してれば引き続き読み書きできる
   void Init(grpc::ServerCompletionQueue* cq,
             std::function<void(grpc::ServerCompletionQueue*)> gen_handler,
             std::shared_ptr<ServerResponseWriterContext<W, R>> context) {
-    std::lock_guard<std::mutex> guard(mutex_);
-
     cq_ = cq;
     gen_handler_ = std::move(gen_handler);
     context_ = context;
     Request(&server_context_, &request_, &response_writer_, cq_,
             &acceptor_thunk_);
   }
-
   typedef W WriteType;
   typedef R ReadType;
+  friend class Server;
 
   void Release() {
     SafeDeleter d(this);
@@ -153,6 +154,7 @@ class ServerResponseWriterHandler {
 
     DoClose(d.lock);
   }
+  friend class ServerResponseWriterContext<W, R>;
 
   void Close() {
     SafeDeleter d(this);
@@ -160,6 +162,7 @@ class ServerResponseWriterHandler {
     DoClose(d.lock);
   }
 
+ public:
   // Close を呼ぶと context_ が nullptr になってしまうが、
   // コールバック中に Context() が無効になると使いにくいので、
   // コールバック中は tmp_context_ を設定しておいて、それが利用可能な場合はそちらを使う
@@ -206,7 +209,7 @@ class ServerResponseWriterHandler {
     --nesting_;
   }
 
- public:
+ private:
   void Finish(W resp, grpc::Status status) {
     std::lock_guard<std::mutex> guard(mutex_);
     SPDLOG_TRACE("[0x{}] Finish: {}", (void*)this, resp.DebugString());
@@ -286,7 +289,9 @@ class ServerResponseWriterHandler {
     }
 
     // 次の要求に備える
+    d.lock.unlock();
     gen_handler_(cq_);
+    d.lock.lock();
 
     status_ = Status::IDLE;
 
@@ -352,11 +357,12 @@ class ServerResponseWriterHandler {
     }
   }
 
+ public:
   virtual void Request(grpc::ServerContext* context, R* request,
                        grpc::ServerAsyncResponseWriter<W>* response_writer,
                        grpc::ServerCompletionQueue* cq, void* tag) = 0;
-  virtual void OnAccept(R request) = 0;
-  virtual void OnError(ServerResponseWriterError error) = 0;
+  virtual void OnAccept(R request) {}
+  virtual void OnError(ServerResponseWriterError error) {}
 };
 
 template <class W, class R>
@@ -503,22 +509,21 @@ class ServerReaderWriterHandler {
     SPDLOG_TRACE("[0x{}] deleted ServerReaderWriterHandler", (void*)this);
   }
 
+ private:
   // ServerResponseWriterContext への参照が消えると自身の Release() が呼ばれるように仕込む
   // Close() や Finish() を呼ぶと自身の持つ context は nullptr になる
   // 誰かが参照してれば引き続き読み書きできる
   void Init(grpc::ServerCompletionQueue* cq,
             std::function<void(grpc::ServerCompletionQueue*)> gen_handler,
             std::shared_ptr<ServerReaderWriterContext<W, R>> context) {
-    std::lock_guard<std::mutex> guard(mutex_);
-
     cq_ = cq;
     gen_handler_ = std::move(gen_handler);
     context_ = context;
     Request(&server_context_, &streamer_, cq_, &acceptor_thunk_);
   }
-
   typedef W WriteType;
   typedef R ReadType;
+  friend class Server;
 
   void Release() {
     SafeDeleter d(this);
@@ -527,6 +532,7 @@ class ServerReaderWriterHandler {
 
     DoClose(d.lock);
   }
+  friend class ServerReaderWriterContext<W, R>;
 
   void Close() {
     SafeDeleter d(this);
@@ -534,6 +540,7 @@ class ServerReaderWriterHandler {
     DoClose(d.lock);
   }
 
+ public:
   // Close を呼ぶと context_ が nullptr になってしまうが、
   // コールバック中に Context() が無効になると使いにくいので、
   // コールバック中は tmp_context_ を設定しておいて、それが利用可能な場合はそちらを使う
@@ -591,7 +598,7 @@ class ServerReaderWriterHandler {
     --nesting_;
   }
 
- public:
+ private:
   void Write(W resp) {
     std::lock_guard<std::mutex> guard(mutex_);
 
@@ -695,7 +702,9 @@ class ServerReaderWriterHandler {
     }
 
     // 次の要求に備える
+    d.lock.unlock();
     gen_handler_(cq_);
+    d.lock.lock();
 
     read_status_ = ReadStatus::READING;
     write_status_ = WriteStatus::IDLE;
@@ -823,10 +832,10 @@ class ServerReaderWriterHandler {
   virtual void Request(grpc::ServerContext* context,
                        grpc::ServerAsyncReaderWriter<W, R>* streamer,
                        grpc::ServerCompletionQueue* cq, void* tag) = 0;
-  virtual void OnAccept() = 0;
-  virtual void OnRead(R req) = 0;
-  virtual void OnReadDoneOrError() = 0;
-  virtual void OnError(ServerReaderWriterError error) = 0;
+  virtual void OnAccept() {}
+  virtual void OnRead(R req) {}
+  virtual void OnReadDoneOrError() {}
+  virtual void OnError(ServerReaderWriterError error) {}
 };
 
 template <class W, class R>
@@ -894,9 +903,9 @@ class Server {
       H* handler = new_from_tuple<H>(std::move(targs));
       auto context =
           std::make_shared<ServerResponseWriterContext<W, R>>(handler);
+      handler->Init(cq, gh->gen_handler, context);
       holders_.push_back(
           std::unique_ptr<Holder>(new ResponseWriterHolder<W, R>(context)));
-      handler->Init(cq, gh->gen_handler, context);
     };
 
     gen_handlers_.push_back(std::move(gh));
@@ -927,9 +936,9 @@ class Server {
 
       H* handler = new_from_tuple<H>(std::move(targs));
       auto context = std::make_shared<ServerReaderWriterContext<W, R>>(handler);
+      handler->Init(cq, gh->gen_handler, context);
       holders_.push_back(
           std::unique_ptr<Holder>(new ReaderWriterHolder<W, R>(context)));
-      handler->Init(cq, gh->gen_handler, context);
     };
 
     gen_handlers_.push_back(std::move(gh));
@@ -1071,7 +1080,7 @@ class Server {
   };
   std::vector<std::unique_ptr<GenHandler>> gen_handlers_;
 
-  std::atomic<bool> shutdown_{false};
+  bool shutdown_ = false;
 };
 
 }  // namespace ggrpc
