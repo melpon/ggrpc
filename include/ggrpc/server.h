@@ -272,7 +272,7 @@ class ServerResponseWriterHandler {
   void ProceedToAccept(bool ok) {
     SafeDeleter d(this);
 
-    SPDLOG_TRACE("ProceedToAccept: ok={}", ok);
+    SPDLOG_TRACE("[0x{}] ProceedToAccept: ok={}", (void*)this, ok);
 
     assert(status_ == Status::LISTENING || status_ == Status::CANCELING);
 
@@ -305,7 +305,7 @@ class ServerResponseWriterHandler {
   void ProceedToWrite(bool ok) {
     SafeDeleter d(this);
 
-    SPDLOG_TRACE("ProceedToWrite: ok={}", ok);
+    SPDLOG_TRACE("[0x{}] ProceedToWrite: ok={}", (void*)this, ok);
 
     assert(status_ == Status::FINISHING || status_ == Status::CANCELING);
 
@@ -332,7 +332,7 @@ class ServerResponseWriterHandler {
   void ProceedToNotify(bool ok) {
     SafeDeleter d(this);
 
-    SPDLOG_TRACE("ProceedToNotify: ok={}", ok);
+    SPDLOG_TRACE("[0x{}] ProceedToNotify: ok={}", (void*)this, ok);
 
     assert(status_ == Status::FINISHING || status_ == Status::CANCELING);
 
@@ -909,6 +909,7 @@ class Server {
       auto context = std::shared_ptr<ServerResponseWriterContext<W, R>>(
           new ServerResponseWriterContext<W, R>(handler));
       handler->Init(cq, gh->gen_handler, context);
+      Collect();
       holders_.push_back(
           std::unique_ptr<Holder>(new ResponseWriterHolder<W, R>(context)));
     };
@@ -943,6 +944,7 @@ class Server {
       auto context = std::shared_ptr<ServerReaderWriterContext<W, R>>(
           new ServerReaderWriterContext<W, R>(handler));
       handler->Init(cq, gh->gen_handler, context);
+      Collect();
       holders_.push_back(
           std::unique_ptr<Holder>(new ReaderWriterHolder<W, R>(context)));
     };
