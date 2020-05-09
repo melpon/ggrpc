@@ -52,20 +52,21 @@ class TestBidiHandler
   void OnAccept() override {
     gg::BidiResponse resp;
     resp.set_value(1);
-    Write(resp);
+    Context()->Write(resp);
   }
   void OnRead(gg::BidiRequest req) override {
     SPDLOG_TRACE("received BidiRequest {}", req.DebugString());
     gg::BidiResponse resp;
     resp.set_value(2);
-    Write(resp);
+    Context()->Write(resp);
   }
   void OnReadDoneOrError() override {
     gg::BidiResponse resp;
     resp.set_value(3);
-    Write(resp);
-    Finish(grpc::Status::OK);
+    Context()->Write(resp);
+    Context()->Finish(grpc::Status::OK);
   }
+  void OnError(ggrpc::ServerReaderWriterError error) override {}
 };
 
 class TestServer {

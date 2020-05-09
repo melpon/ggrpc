@@ -134,6 +134,8 @@ class ServerResponseWriterHandler {
   void Init(grpc::ServerCompletionQueue* cq,
             std::function<void(grpc::ServerCompletionQueue*)> gen_handler,
             std::shared_ptr<ServerResponseWriterContext<W, R>> context) {
+    std::lock_guard<std::mutex> guard(mutex_);
+
     cq_ = cq;
     gen_handler_ = std::move(gen_handler);
     context_ = context;
@@ -290,15 +292,6 @@ class ServerResponseWriterHandler {
 
     RunCallback(d.lock, "OnAccept", &ServerResponseWriterHandler::OnAccept,
                 std::move(request_));
-    //++nesting_;
-    //d.lock.unlock();
-    //try {
-    //  OnAccept(std::move(request_));
-    //} catch (...) {
-    //  SPDLOG_ERROR("OnAccept failed");
-    //}
-    //d.lock.lock();
-    //--nesting_;
   }
 
   void ProceedToWrite(bool ok) {
@@ -318,15 +311,8 @@ class ServerResponseWriterHandler {
     if (!ok) {
       SPDLOG_ERROR("write failed");
       status_ = Status::FINISHED;
-      ++nesting_;
-      d.lock.unlock();
-      try {
-        OnError(ServerResponseWriterError::WRITE);
-      } catch (...) {
-        SPDLOG_ERROR("OnError failed");
-      }
-      d.lock.lock();
-      --nesting_;
+      RunCallback(d.lock, "OnError", &ServerResponseWriterHandler::OnError,
+                  ServerResponseWriterError::WRITE);
       Done(d.lock);
       return;
     }
@@ -352,15 +338,8 @@ class ServerResponseWriterHandler {
     if (!ok) {
       SPDLOG_WARN("Alarm cancelled");
       status_ = Status::FINISHED;
-      ++nesting_;
-      d.lock.unlock();
-      try {
-        OnError(ServerResponseWriterError::WRITE);
-      } catch (...) {
-        SPDLOG_ERROR("OnError failed");
-      }
-      d.lock.lock();
-      --nesting_;
+      RunCallback(d.lock, "OnError", &ServerResponseWriterHandler::OnError,
+                  ServerResponseWriterError::WRITE);
       Done(d.lock);
       return;
     }
@@ -400,6 +379,25 @@ template <class W, class R>
 void ServerResponseWriterContext<W, R>::Close() {
   p_->Close();
 }
+
+enum class ServerReaderWriterError {
+  WRITE,
+};
+
+template <class W, class R>
+class ServerReaderWriterHandler;
+
+template <class W, class R>
+class ServerReaderWriterContext {
+  ServerReaderWriterHandler<W, R>* p_;
+
+ public:
+  ServerReaderWriterContext(ServerReaderWriterHandler<W, R>* p);
+  ~ServerReaderWriterContext();
+  void Write(W resp);
+  void Finish(grpc::Status status);
+  void Close();
+};
 
 template <class W, class R>
 class ServerReaderWriterHandler {
@@ -455,15 +453,44 @@ class ServerReaderWriterHandler {
   friend class NotifierThunk;
 
   // 状態マシン
-  enum class ReadStatus { LISTENING, READING, FINISHED };
-  enum class WriteStatus { LISTENING, WRITING, IDLE, FINISHING, FINISHED };
+  enum class ReadStatus { LISTENING, READING, CANCELING, FINISHED };
+  enum class WriteStatus {
+    LISTENING,
+    WRITING,
+    IDLE,
+    FINISHING,
+    CANCELING,
+    FINISHED
+  };
   ReadStatus read_status_ = ReadStatus::LISTENING;
   WriteStatus write_status_ = WriteStatus::LISTENING;
 
-  grpc::Alarm notify_alarm_;
-  void Notify() {
-    notify_alarm_.Set(cq_, gpr_time_0(GPR_TIMESPAN), &notifier_thunk_);
-  }
+  bool release_ = false;
+  int nesting_ = 0;
+
+  grpc::Alarm alarm_;
+  void Notify() { alarm_.Set(cq_, gpr_time_0(GPR_TIMESPAN), &notifier_thunk_); }
+
+  std::shared_ptr<ServerReaderWriterContext<W, R>> context_;
+  std::shared_ptr<ServerReaderWriterContext<W, R>> tmp_context_;
+
+  struct SafeDeleter {
+    ServerReaderWriterHandler<W, R>* p;
+    std::unique_lock<std::mutex> lock;
+    SafeDeleter(ServerReaderWriterHandler<W, R>* p) : p(p), lock(p->mutex_) {}
+    ~SafeDeleter() {
+      bool del = p->release_ &&
+                 p->read_status_ ==
+                     ServerReaderWriterHandler<W, R>::ReadStatus::FINISHED &&
+                 p->write_status_ ==
+                     ServerReaderWriterHandler<W, R>::WriteStatus::FINISHED &&
+                 p->nesting_ == 0;
+      lock.unlock();
+      if (del) {
+        delete p;
+      }
+    }
+  };
 
  public:
   ServerReaderWriterHandler()
@@ -473,29 +500,100 @@ class ServerReaderWriterHandler {
         writer_thunk_(this),
         notifier_thunk_(this) {}
   virtual ~ServerReaderWriterHandler() {
-    SPDLOG_TRACE("[0x{}] deleted", (void*)this);
+    SPDLOG_TRACE("[0x{}] deleted ServerReaderWriterHandler", (void*)this);
+  }
+
+  // ServerResponseWriterContext への参照が消えると自身の Release() が呼ばれるように仕込む
+  // Close() や Finish() を呼ぶと自身の持つ context は nullptr になる
+  // 誰かが参照してれば引き続き読み書きできる
+  void Init(grpc::ServerCompletionQueue* cq,
+            std::function<void(grpc::ServerCompletionQueue*)> gen_handler,
+            std::shared_ptr<ServerReaderWriterContext<W, R>> context) {
+    std::lock_guard<std::mutex> guard(mutex_);
+
+    cq_ = cq;
+    gen_handler_ = std::move(gen_handler);
+    context_ = context;
+    Request(&server_context_, &streamer_, cq_, &acceptor_thunk_);
   }
 
   typedef W WriteType;
   typedef R ReadType;
 
-  void Init(std::function<bool()> shutdown_requested,
-            grpc::ServerCompletionQueue* cq,
-            std::function<void(grpc::ServerCompletionQueue*)> gen_handler) {
-    std::lock_guard<std::mutex> guard(mutex_);
+  void Release() {
+    SafeDeleter d(this);
 
-    shutdown_requested_ = std::move(shutdown_requested);
-    cq_ = cq;
-    gen_handler_ = std::move(gen_handler);
-    Request(&server_context_, &streamer_, cq_, &acceptor_thunk_);
+    release_ = true;
+
+    DoClose(d.lock);
   }
 
-  void Write(W resp) {
-    std::lock_guard<std::mutex> guard(mutex_);
+  void Close() {
+    SafeDeleter d(this);
 
-    if (shutdown_requested_()) {
+    DoClose(d.lock);
+  }
+
+  // Close を呼ぶと context_ が nullptr になってしまうが、
+  // コールバック中に Context() が無効になると使いにくいので、
+  // コールバック中は tmp_context_ を設定しておいて、それが利用可能な場合はそちらを使う
+  std::shared_ptr<ServerReaderWriterContext<W, R>> Context() const {
+    std::unique_lock<std::mutex> lock(mutex_);
+    return tmp_context_ ? tmp_context_ : context_;
+  }
+
+ private:
+  void DoClose(std::unique_lock<std::mutex>& lock) {
+    // 読み書き中ならキャンセルする
+    if (read_status_ == ReadStatus::READING ||
+        write_status_ == WriteStatus::WRITING ||
+        write_status_ == WriteStatus::FINISHING) {
+      server_context_.TryCancel();
+      // 書き込み中ならアラームもキャンセルする
+      if (write_status_ == WriteStatus::WRITING ||
+          write_status_ == WriteStatus::FINISHING) {
+        alarm_.Cancel();
+      }
+    }
+
+    if (read_status_ == ReadStatus::READING ||
+        read_status_ == ReadStatus::CANCELING ||
+        read_status_ == ReadStatus::LISTENING) {
+      read_status_ = ReadStatus::CANCELING;
+    } else {
+      read_status_ = ReadStatus::FINISHED;
+    }
+    if (write_status_ == WriteStatus::WRITING ||
+        write_status_ == WriteStatus::FINISHING ||
+        write_status_ == WriteStatus::CANCELING ||
+        write_status_ == WriteStatus::LISTENING) {
+      write_status_ = WriteStatus::CANCELING;
+    } else {
+      write_status_ = WriteStatus::FINISHED;
+    }
+
+    Done(lock);
+  }
+
+  void Done(std::unique_lock<std::mutex>& lock) {
+    if (read_status_ != ReadStatus::FINISHED ||
+        write_status_ != WriteStatus::FINISHED) {
       return;
     }
+
+    auto context = std::move(context_);
+
+    ++nesting_;
+    lock.unlock();
+    // 誰も参照してなければここで Release() が呼ばれる
+    context.reset();
+    lock.lock();
+    --nesting_;
+  }
+
+ public:
+  void Write(W resp) {
+    std::lock_guard<std::mutex> guard(mutex_);
 
     SPDLOG_TRACE("[0x{}] Write: {}", (void*)this, resp.DebugString());
 
@@ -519,10 +617,6 @@ class ServerReaderWriterHandler {
   void Finish(grpc::Status status) {
     std::lock_guard<std::mutex> guard(mutex_);
 
-    if (shutdown_requested_()) {
-      return;
-    }
-
     SPDLOG_TRACE("[0x{}] Finish", (void*)this);
 
     if (write_status_ == WriteStatus::IDLE) {
@@ -543,147 +637,132 @@ class ServerReaderWriterHandler {
   }
 
  private:
-  void FinishRead() {
-    if (read_status_ == ReadStatus::LISTENING ||
-        read_status_ == ReadStatus::READING) {
-      server_context_.TryCancel();
-    } else {
-      read_status_ = ReadStatus::FINISHED;
+  template <class MemF, class... Args>
+  void RunCallback(std::unique_lock<std::mutex>& lock, std::string funcname,
+                   MemF mf, Args&&... args) {
+    // コールバック中は tmp_context_ を有効にする
+    if (nesting_ == 0) {
+      tmp_context_ = context_;
     }
-  }
-  void FinishWrite() {
-    if (write_status_ == WriteStatus::LISTENING ||
-        write_status_ == WriteStatus::WRITING ||
-        write_status_ == WriteStatus::FINISHING) {
-      server_context_.TryCancel();
-    } else {
-      write_status_ = WriteStatus::FINISHED;
+    ++nesting_;
+    lock.unlock();
+    try {
+      (this->*mf)(std::forward<Args>(args)...);
+    } catch (std::exception& e) {
+      SPDLOG_ERROR("{} error: what={}", funcname, e.what());
+    } catch (...) {
+      SPDLOG_ERROR("{} error", funcname);
     }
-  }
+    lock.lock();
+    --nesting_;
 
-  bool Deletable() {
-    return read_status_ == ReadStatus::FINISHED &&
-           write_status_ == WriteStatus::FINISHED;
+    if (nesting_ == 0) {
+      auto context = std::move(tmp_context_);
+      ++nesting_;
+      lock.unlock();
+      context.reset();
+      lock.lock();
+      --nesting_;
+    }
   }
 
   void ProceedToAccept(bool ok) {
-    std::unique_ptr<ServerReaderWriterHandler> p;
-    std::unique_lock<std::mutex> lock(mutex_);
+    SafeDeleter d(this);
 
     SPDLOG_TRACE("[0x{}] ProceedToAccept: ok={}", (void*)this, ok);
 
-    // サーバのシャットダウン要求が来てたら次の Accept 待ちをしない
-    if (shutdown_requested_()) {
+    assert(read_status_ == ReadStatus::LISTENING &&
+               write_status_ == WriteStatus::LISTENING ||
+           read_status_ == ReadStatus::CANCELING &&
+               write_status_ == WriteStatus::CANCELING);
+
+    if (read_status_ == ReadStatus::CANCELING ||
+        write_status_ == WriteStatus::CANCELING) {
+      // 終了
       read_status_ = ReadStatus::FINISHED;
       write_status_ = WriteStatus::FINISHED;
-      if (Deletable()) {
-        p.reset(this);
-      }
+      Done(d.lock);
       return;
     }
 
-    // Accept の失敗も次の Accept 待ちをしない
+    // Accept 失敗
     if (!ok) {
       SPDLOG_ERROR("Accept failed");
       read_status_ = ReadStatus::FINISHED;
       write_status_ = WriteStatus::FINISHED;
-      if (Deletable()) {
-        p.reset(this);
-      }
+      Done(d.lock);
       return;
     }
 
     // 次の要求に備える
     gen_handler_(cq_);
 
+    read_status_ = ReadStatus::READING;
     write_status_ = WriteStatus::IDLE;
 
-    lock.unlock();
-    try {
-      OnAccept();
-      lock.lock();
-    } catch (...) {
-      lock.lock();
-    }
-
-    read_status_ = ReadStatus::READING;
     streamer_.Read(&request_, &reader_thunk_);
+
+    RunCallback(d.lock, "OnAccept", &ServerReaderWriterHandler::OnAccept);
   }
 
   void ProceedToRead(bool ok) {
-    std::unique_ptr<ServerReaderWriterHandler> p;
-    std::unique_lock<std::mutex> lock(mutex_);
+    SafeDeleter d(this);
 
     SPDLOG_TRACE("[0x{}] ProceedToRead: ok={}", (void*)this, ok);
 
-    if (shutdown_requested_()) {
-      SPDLOG_DEBUG("shutdown requested");
+    assert(read_status_ == ReadStatus::READING ||
+           read_status_ == ReadStatus::CANCELING);
+
+    if (read_status_ == ReadStatus::CANCELING) {
+      // 終了
       read_status_ = ReadStatus::FINISHED;
-      FinishWrite();
-      if (Deletable()) {
-        p.reset(this);
-      }
+      Done(d.lock);
       return;
     }
 
     if (!ok) {
       // 読み込みがすべて完了した（あるいは失敗した）
       // あとは書き込み処理が終わるのを待つだけ
-      lock.unlock();
-      try {
-        OnReadDoneOrError();
-        lock.lock();
-      } catch (...) {
-        lock.lock();
-      }
-
       read_status_ = ReadStatus::FINISHED;
-      if (Deletable()) {
-        p.reset(this);
-      }
+      RunCallback(d.lock, "OnReadDoneOrError",
+                  &ServerReaderWriterHandler::OnReadDoneOrError);
+      Done(d.lock);
       return;
     }
 
-    lock.unlock();
-    try {
-      OnRead(std::move(request_));
-      lock.lock();
-    } catch (...) {
-      lock.lock();
-    }
+    RunCallback(d.lock, "OnRead", &ServerReaderWriterHandler::OnRead,
+                std::move(request_));
 
     // 次の読み込み
     streamer_.Read(&request_, &reader_thunk_);
   }
 
   void ProceedToWrite(bool ok) {
-    std::unique_ptr<ServerReaderWriterHandler> p;
-    std::unique_lock<std::mutex> lock(mutex_);
+    SafeDeleter d(this);
 
     SPDLOG_TRACE("[0x{}] ProceedToWrite: ok={}", (void*)this, ok);
 
-    if (shutdown_requested_()) {
-      SPDLOG_DEBUG("shutdown requested");
-      FinishRead();
+    assert(write_status_ == WriteStatus::WRITING ||
+           write_status_ == WriteStatus::FINISHING ||
+           write_status_ == WriteStatus::CANCELING);
+
+    if (write_status_ == WriteStatus::CANCELING) {
+      // 終了
       write_status_ = WriteStatus::FINISHED;
-      if (Deletable()) {
-        p.reset(this);
-      }
+      Done(d.lock);
       return;
     }
 
     if (!ok) {
       SPDLOG_ERROR("write failed");
-      FinishRead();
       write_status_ = WriteStatus::FINISHED;
-      if (Deletable()) {
-        p.reset(this);
-      }
+      RunCallback(d.lock, "OnError", &ServerReaderWriterHandler::OnError,
+                  ServerReaderWriterError::WRITE);
+      Done(d.lock);
       return;
     }
 
-    if (write_status_ == WriteStatus::IDLE) {
-    } else if (write_status_ == WriteStatus::WRITING) {
+    if (write_status_ == WriteStatus::WRITING) {
       response_queue_.pop_front();
       if (response_queue_.empty()) {
         write_status_ = WriteStatus::IDLE;
@@ -700,76 +779,45 @@ class ServerReaderWriterHandler {
       }
     } else if (write_status_ == WriteStatus::FINISHING) {
       write_status_ = WriteStatus::FINISHED;
-      if (Deletable()) {
-        p.reset(this);
-      }
+      Done(d.lock);
     }
   }
 
   void ProceedToNotify(bool ok) {
-    std::unique_ptr<ServerReaderWriterHandler> p;
-    std::lock_guard<std::mutex> guard(mutex_);
+    SafeDeleter d(this);
 
     SPDLOG_TRACE("[0x{}] ProceedToNotify: ok={}", (void*)this, ok);
 
-    if (shutdown_requested_()) {
-      SPDLOG_DEBUG("shutdown requested");
-      FinishRead();
+    assert(write_status_ == WriteStatus::WRITING ||
+           write_status_ == WriteStatus::FINISHING ||
+           write_status_ == WriteStatus::CANCELING);
+    assert(!response_queue_.empty());
+
+    if (write_status_ == WriteStatus::CANCELING) {
+      // 終了
       write_status_ = WriteStatus::FINISHED;
-      if (Deletable()) {
-        p.reset(this);
-      }
+      Done(d.lock);
       return;
     }
 
     if (!ok) {
-      SPDLOG_WARN("Alarm cancelled");
-      if (read_status_ == ReadStatus::LISTENING ||
-          read_status_ == ReadStatus::READING) {
-        server_context_.TryCancel();
-      } else {
-        read_status_ = ReadStatus::FINISHED;
-      }
+      SPDLOG_ERROR("alarm cancelled");
       write_status_ = WriteStatus::FINISHED;
-      if (Deletable()) {
-        p.reset(this);
-      }
+      RunCallback(d.lock, "OnError", &ServerReaderWriterHandler::OnError,
+                  ServerReaderWriterError::WRITE);
+      Done(d.lock);
       return;
     }
 
-    if (response_queue_.empty()) {
-      SPDLOG_WARN("response_queue_ is empty");
-      FinishRead();
-      write_status_ = WriteStatus::FINISHED;
-      if (Deletable()) {
-        p.reset(this);
-      }
-      return;
-    }
-
-    auto& d = response_queue_.front();
-    if (!d.finish) {
+    auto& data = response_queue_.front();
+    if (!data.finish) {
       // Response
-      streamer_.Write(std::move(d.response), &writer_thunk_);
+      streamer_.Write(std::move(data.response), &writer_thunk_);
     } else {
       // Finish
-      streamer_.Finish(d.status, &writer_thunk_);
-      write_status_ = WriteStatus::FINISHING;
+      streamer_.Finish(data.status, &writer_thunk_);
     }
   }
-
- private:
-  // Success を呼ばずに return した場合、必ず Finish を呼ぶガード
-  struct FinishGuard {
-    ServerReaderWriterHandler* p;
-    FinishGuard(ServerReaderWriterHandler* p) : p(p) {}
-    ~FinishGuard() {
-      if (p) {
-        p->Finish(grpc::Status::CANCELLED);
-      }
-    }
-    void Success() { p = nullptr; }
-  };
 
  public:
   virtual void Request(grpc::ServerContext* context,
@@ -778,7 +826,29 @@ class ServerReaderWriterHandler {
   virtual void OnAccept() = 0;
   virtual void OnRead(R req) = 0;
   virtual void OnReadDoneOrError() = 0;
+  virtual void OnError(ServerReaderWriterError error) = 0;
 };
+
+template <class W, class R>
+ServerReaderWriterContext<W, R>::ServerReaderWriterContext(
+    ServerReaderWriterHandler<W, R>* p)
+    : p_(p) {}
+template <class W, class R>
+ServerReaderWriterContext<W, R>::~ServerReaderWriterContext() {
+  p_->Release();
+}
+template <class W, class R>
+void ServerReaderWriterContext<W, R>::Write(W resp) {
+  p_->Write(std::move(resp));
+}
+template <class W, class R>
+void ServerReaderWriterContext<W, R>::Finish(grpc::Status status) {
+  p_->Finish(status);
+}
+template <class W, class R>
+void ServerReaderWriterContext<W, R>::Close() {
+  p_->Close();
+}
 
 template <class T, class Tuple, std::size_t... Index>
 T* new_from_tuple_impl(Tuple&& t, std::index_sequence<Index...>) {
@@ -834,6 +904,9 @@ class Server {
 
   template <class H, class... Args>
   void AddReaderWriterHandler(Args... args) {
+    typedef typename H::WriteType W;
+    typedef typename H::ReadType R;
+
     std::lock_guard<std::mutex> guard(mutex_);
 
     // 既に Start 済み
@@ -846,15 +919,18 @@ class Server {
     }
 
     std::tuple<Args...> targs(std::move(args)...);
-    auto shutdown_requested = [this]() -> bool { return shutdown_; };
 
     std::unique_ptr<GenHandler> gh(new GenHandler());
-    gh->gen_handler =
-        [shutdown_requested = std::move(shutdown_requested), gh = gh.get(),
-         targs = std::move(targs)](grpc::ServerCompletionQueue* cq) {
-          H* handler = new_from_tuple<H>(std::move(targs));
-          handler->Init(shutdown_requested, cq, gh->gen_handler);
-        };
+    gh->gen_handler = [this, gh = gh.get(), targs = std::move(targs)](
+                          grpc::ServerCompletionQueue* cq) {
+      std::lock_guard<std::mutex> guard(mutex_);
+
+      H* handler = new_from_tuple<H>(std::move(targs));
+      auto context = std::make_shared<ServerReaderWriterContext<W, R>>(handler);
+      holders_.push_back(
+          std::unique_ptr<Holder>(new ReaderWriterHolder<W, R>(context)));
+      handler->Init(cq, gh->gen_handler, context);
+    };
 
     gen_handlers_.push_back(std::move(gh));
   }
@@ -970,18 +1046,19 @@ class Server {
     }
     bool Expired() override { return wp.expired(); }
   };
-  //template <class W, class R>
-  //struct ReaderWriterHolder : Holder {
-  //  std::weak_ptr<ServerReaderWriterContext<W, R>> wp;
-  //  ReaderWriterHolder(std::shared_ptr<ServerReaderWriterContext<W, R>> p) : wp(p) {}
-  //  void Close() override {
-  //    auto sp = wp.lock();
-  //    if (sp) {
-  //      sp->Close();
-  //    }
-  //  }
-  //  bool Expired() override { return wp.expired(); }
-  //};
+  template <class W, class R>
+  struct ReaderWriterHolder : Holder {
+    std::weak_ptr<ServerReaderWriterContext<W, R>> wp;
+    ReaderWriterHolder(std::shared_ptr<ServerReaderWriterContext<W, R>> p)
+        : wp(p) {}
+    void Close() override {
+      auto sp = wp.lock();
+      if (sp) {
+        sp->Close();
+      }
+    }
+    bool Expired() override { return wp.expired(); }
+  };
   std::vector<std::unique_ptr<Holder>> holders_;
 
   std::vector<std::unique_ptr<grpc::ServerCompletionQueue>> cqs_;
