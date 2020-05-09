@@ -17,6 +17,8 @@ ggrpc は、マルチスレッドで安全に動作し、グレースフルシ�
 クライアント側:
 
 ```cpp
+namespace ggrpc {
+
 // 単体リクエスト用
 enum class ClientResponseWriterError {
   FINISH,
@@ -87,11 +89,15 @@ public:
   std::shared_ptr<ClientReaderWriter<W, R>> CreateReaderWriter(
       typename ClientReaderWriter<W, R>::ConnectFunc connect);
 };
+
+}
 ```
 
 サーバ側:
 
 ```cpp
+namespace ggrpc {
+
 // 単体リクエスト用
 enum class ServerResponseWriterError {
   WRITE,
@@ -143,6 +149,8 @@ class ServerReaderWriterHandler {
   virtual void OnReadDoneOrError() {}
   virtual void OnError(ServerReaderWriterError error) {}
 };
+
+}
 ```
 
 ## TODO
