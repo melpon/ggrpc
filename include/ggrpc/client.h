@@ -30,12 +30,6 @@ enum class ClientResponseWriterError {
   FINISH,
 };
 
-enum class ClientReaderWriterError {
-  CONNECT,
-  READ,
-  WRITE,
-};
-
 template <class W, class R>
 class ClientResponseReader {
  public:
@@ -88,10 +82,8 @@ class ClientResponseReader {
   };
   friend struct SafeDeleter;
 
- public:
   ClientResponseReader(grpc::CompletionQueue* cq, RequestFunc request)
       : reader_thunk_(this), cq_(cq), request_(std::move(request)) {}
-
   ~ClientResponseReader() { SPDLOG_TRACE("[0x{}] deleted", (void*)this); }
 
   // コピー、ムーブ禁止
@@ -100,6 +92,7 @@ class ClientResponseReader {
   ClientResponseReader& operator=(const ClientResponseReader&) = delete;
   ClientResponseReader& operator=(ClientResponseReader&&) = delete;
 
+ public:
   void SetOnResponse(OnResponseFunc on_response) {
     std::lock_guard<std::mutex> guard(mutex_);
     if (status_ == Status::DONE) {
@@ -227,6 +220,12 @@ class ClientResponseReader {
   }
 };
 
+enum class ClientReaderWriterError {
+  CONNECT,
+  READ,
+  WRITE,
+};
+
 template <class W, class R>
 class ClientReaderWriter {
  public:
@@ -329,7 +328,6 @@ class ClientReaderWriter {
   };
   friend struct SafeDeleter;
 
- public:
   ClientReaderWriter(grpc::CompletionQueue* cq, ConnectFunc connect)
       : connector_thunk_(this),
         reader_thunk_(this),
@@ -345,6 +343,7 @@ class ClientReaderWriter {
   ClientReaderWriter& operator=(const ClientReaderWriter&) = delete;
   ClientReaderWriter& operator=(ClientReaderWriter&&) = delete;
 
+ public:
   void SetOnConnect(OnConnectFunc on_connect) {
     std::lock_guard<std::mutex> guard(mutex_);
     if (read_status_ != ReadStatus::INIT ||

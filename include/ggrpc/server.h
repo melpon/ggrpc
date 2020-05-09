@@ -38,8 +38,11 @@ template <class W, class R>
 class ServerResponseWriterContext {
   ServerResponseWriterHandler<W, R>* p_;
 
- public:
   ServerResponseWriterContext(ServerResponseWriterHandler<W, R>* p);
+
+  friend class Server;
+
+ public:
   ~ServerResponseWriterContext();
   void Finish(W resp, grpc::Status status);
   void FinishWithError(grpc::Status status);
@@ -397,8 +400,10 @@ template <class W, class R>
 class ServerReaderWriterContext {
   ServerReaderWriterHandler<W, R>* p_;
 
- public:
   ServerReaderWriterContext(ServerReaderWriterHandler<W, R>* p);
+  friend class Server;
+
+ public:
   ~ServerReaderWriterContext();
   void Write(W resp);
   void Finish(grpc::Status status);
@@ -901,8 +906,8 @@ class Server {
       std::lock_guard<std::mutex> guard(mutex_);
 
       H* handler = new_from_tuple<H>(std::move(targs));
-      auto context =
-          std::make_shared<ServerResponseWriterContext<W, R>>(handler);
+      auto context = std::shared_ptr<ServerResponseWriterContext<W, R>>(
+          new ServerResponseWriterContext<W, R>(handler));
       handler->Init(cq, gh->gen_handler, context);
       holders_.push_back(
           std::unique_ptr<Holder>(new ResponseWriterHolder<W, R>(context)));
@@ -935,7 +940,8 @@ class Server {
       std::lock_guard<std::mutex> guard(mutex_);
 
       H* handler = new_from_tuple<H>(std::move(targs));
-      auto context = std::make_shared<ServerReaderWriterContext<W, R>>(handler);
+      auto context = std::shared_ptr<ServerReaderWriterContext<W, R>>(
+          new ServerReaderWriterContext<W, R>(handler));
       handler->Init(cq, gh->gen_handler, context);
       holders_.push_back(
           std::unique_ptr<Holder>(new ReaderWriterHolder<W, R>(context)));
