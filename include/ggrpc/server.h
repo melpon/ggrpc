@@ -64,8 +64,8 @@ class ServerResponseWriterHandler {
     bool error;
     // finish == false
     W response;
-    // finish == true
     grpc::Status status;
+    int64_t id;
   };
   ResponseData response_;
 
@@ -326,6 +326,8 @@ class ServerResponseWriterHandler {
     }
 
     status_ = Status::FINISHED;
+    RunCallback(d.lock, "OnFinish", &ServerResponseWriterHandler::OnFinish,
+                std::move(response_.response), response_.status);
     Done(d.lock);
   }
 
@@ -353,7 +355,7 @@ class ServerResponseWriterHandler {
     }
 
     if (!response_.error) {
-      response_writer_.Finish(std::move(response_.response), response_.status,
+      response_writer_.Finish(response_.response, response_.status,
                               &writer_thunk_);
     } else {
       response_writer_.FinishWithError(response_.status, &writer_thunk_);
@@ -365,6 +367,7 @@ class ServerResponseWriterHandler {
                        grpc::ServerAsyncResponseWriter<W>* response_writer,
                        grpc::ServerCompletionQueue* cq, void* tag) = 0;
   virtual void OnAccept(R request) {}
+  virtual void OnFinish(W response, grpc::Status status) {}
   virtual void OnError(ServerResponseWriterError error) {}
 };
 
@@ -405,7 +408,7 @@ class ServerReaderWriterContext {
 
  public:
   ~ServerReaderWriterContext();
-  void Write(W resp);
+  void Write(W resp, int64_t id = 0);
   void Finish(grpc::Status status);
   void Close();
 };
@@ -426,6 +429,7 @@ class ServerReaderWriterHandler {
     bool finish;
     // finish == false
     W response;
+    int64_t id;
     // finish == true
     grpc::Status status;
   };
@@ -604,7 +608,7 @@ class ServerReaderWriterHandler {
   }
 
  private:
-  void Write(W resp) {
+  void Write(W resp, int64_t id) {
     std::lock_guard<std::mutex> guard(mutex_);
 
     SPDLOG_TRACE("[0x{}] Write: {}", (void*)this, resp.DebugString());
@@ -613,6 +617,7 @@ class ServerReaderWriterHandler {
       ResponseData d;
       d.finish = false;
       d.response = std::move(resp);
+      d.id = id;
 
       write_status_ = WriteStatus::WRITING;
       response_queue_.push_back(std::move(d));
@@ -621,6 +626,7 @@ class ServerReaderWriterHandler {
       ResponseData d;
       d.finish = false;
       d.response = std::move(resp);
+      d.id = id;
 
       response_queue_.push_back(std::move(d));
     }
@@ -759,6 +765,7 @@ class ServerReaderWriterHandler {
     assert(write_status_ == WriteStatus::WRITING ||
            write_status_ == WriteStatus::FINISHING ||
            write_status_ == WriteStatus::CANCELING);
+    assert(!response_queue_.empty());
 
     if (write_status_ == WriteStatus::CANCELING) {
       // 終了
@@ -776,23 +783,30 @@ class ServerReaderWriterHandler {
       return;
     }
 
+    auto resp = std::move(response_queue_.front());
+    response_queue_.pop_front();
+
     if (write_status_ == WriteStatus::WRITING) {
-      response_queue_.pop_front();
       if (response_queue_.empty()) {
         write_status_ = WriteStatus::IDLE;
       } else {
-        auto& d = response_queue_.front();
-        if (!d.finish) {
+        auto& next = response_queue_.front();
+        if (!next.finish) {
           // Response
-          streamer_.Write(std::move(d.response), &writer_thunk_);
+          streamer_.Write(next.response, &writer_thunk_);
         } else {
           // Finish
-          streamer_.Finish(d.status, &writer_thunk_);
+          streamer_.Finish(next.status, &writer_thunk_);
           write_status_ = WriteStatus::FINISHING;
         }
       }
+      RunCallback(d.lock, "OnWrite", &ServerReaderWriterHandler::OnWrite,
+                  std::move(resp.response), resp.id);
     } else if (write_status_ == WriteStatus::FINISHING) {
+      assert(resp.finish);
       write_status_ = WriteStatus::FINISHED;
+      RunCallback(d.lock, "OnFinish", &ServerReaderWriterHandler::OnFinish,
+                  resp.status);
       Done(d.lock);
     }
   }
@@ -840,6 +854,8 @@ class ServerReaderWriterHandler {
   virtual void OnAccept() {}
   virtual void OnRead(R req) {}
   virtual void OnReadDoneOrError() {}
+  virtual void OnWrite(W response, int64_t id) {}
+  virtual void OnFinish(grpc::Status status) {}
   virtual void OnError(ServerReaderWriterError error) {}
 };
 
@@ -852,8 +868,8 @@ ServerReaderWriterContext<W, R>::~ServerReaderWriterContext() {
   p_->Release();
 }
 template <class W, class R>
-void ServerReaderWriterContext<W, R>::Write(W resp) {
-  p_->Write(std::move(resp));
+void ServerReaderWriterContext<W, R>::Write(W resp, int64_t id) {
+  p_->Write(std::move(resp), id);
 }
 template <class W, class R>
 void ServerReaderWriterContext<W, R>::Finish(grpc::Status status) {

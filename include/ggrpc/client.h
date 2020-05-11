@@ -659,12 +659,13 @@ class ClientReaderWriter {
       return;
     }
 
-    auto& req = request_queue_.front();
-    RunCallback(d.lock, "OnWrite", on_write_, std::move(req.request), req.id);
+    auto req = std::move(request_queue_.front());
     request_queue_.pop_front();
 
     // 書き込みが成功したら次のキューを処理する
     HandleRequestQueue();
+
+    RunCallback(d.lock, "OnWrite", on_write_, std::move(req.request), req.id);
   }
 
   void HandleRequestQueue() {

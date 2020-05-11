@@ -122,6 +122,7 @@ class ServerResponseWriterHandler {
                        grpc::ServerAsyncResponseWriter<W>* response_writer,
                        grpc::ServerCompletionQueue* cq, void* tag) = 0;
   virtual void OnAccept(R request) {}
+  virtual void OnFinish(W response, grpc::Status status) {}
   virtual void OnError(ServerResponseWriterError error) {}
 };
 
@@ -133,7 +134,7 @@ enum class ServerReaderWriterError {
 template <class W, class R>
 class ServerReaderWriterContext {
  public:
-  void Write(W resp);
+  void Write(W resp, int64_t id);
   void Finish(grpc::Status status);
   void Close();
 };
@@ -149,6 +150,8 @@ class ServerReaderWriterHandler {
   virtual void OnAccept() {}
   virtual void OnRead(R req) {}
   virtual void OnReadDoneOrError() {}
+  virtual void OnWrite(W response, int64_t id) {}
+  virtual void OnFinish(grpc::Status status) {}
   virtual void OnError(ServerReaderWriterError error) {}
 };
 
@@ -158,7 +161,6 @@ class ServerReaderWriterHandler {
 ## TODO
 
 - ドキュメント書く
-- 書き込み成功のコールバックを実装する
 - アラーム機能を実装する
 - クライアントストリーミング、サーバストリーミングを実装する
 - spdlog 依存を無くす
