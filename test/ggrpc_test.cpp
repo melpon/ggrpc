@@ -228,8 +228,8 @@ void test_server() {
   }
 
 void _test_alarm(std::shared_ptr<ggrpc::Alarm> alarm) {
-  int n = 0;
-  int m = 0;
+  std::atomic<int> n = 0;
+  std::atomic<int> m = 0;
 
   n = 0;
   alarm->Set(std::chrono::milliseconds(100), [&n](bool ok) { n = ok ? 1 : 2; });
@@ -304,7 +304,7 @@ void test_client_alarm() {
   _test_alarm(alarm);
 
   // シャットダウンのテスト
-  int n = 0;
+  std::atomic<int> n = 0;
   alarm->Set(std::chrono::milliseconds(100), [&n, alarm](bool ok) {
     n = ok ? 1 : 2;
     if (!ok) {
@@ -327,7 +327,7 @@ void test_server_alarm() {
   _test_alarm(alarm);
 
   // シャットダウンのテスト
-  int n = 0;
+  std::atomic<int> n = 0;
   alarm->Set(std::chrono::milliseconds(100), [&n, alarm](bool ok) {
     n = ok ? 1 : 2;
     if (!ok) {
