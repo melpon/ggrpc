@@ -236,6 +236,7 @@ class ClientReaderWriter {
   typedef std::function<void(R)> OnReadFunc;
   typedef std::function<void(grpc::Status)> OnReadDoneFunc;
   typedef std::function<void(ClientReaderWriterError)> OnErrorFunc;
+  typedef std::function<void(W, int64_t)> OnWriteFunc;
   typedef std::function<void()> OnWritesDoneFunc;
 
  private:
@@ -291,6 +292,7 @@ class ClientReaderWriter {
 
   struct RequestData {
     bool is_done;
+    int64_t id;
     W request;
   };
   std::deque<RequestData> request_queue_;
@@ -308,6 +310,7 @@ class ClientReaderWriter {
   OnReadFunc on_read_;
   OnReadDoneFunc on_read_done_;
   OnErrorFunc on_error_;
+  OnWriteFunc on_write_;
   OnWritesDoneFunc on_writes_done_;
 
   struct SafeDeleter {
@@ -367,6 +370,14 @@ class ClientReaderWriter {
       return;
     }
     on_read_done_ = std::move(on_read_done);
+  }
+  void SetOnWrite(OnWriteFunc on_write) {
+    std::lock_guard<std::mutex> guard(mutex_);
+    if (read_status_ != ReadStatus::INIT ||
+        write_status_ != WriteStatus::INIT) {
+      return;
+    }
+    on_write_ = std::move(on_write_);
   }
   void SetOnWritesDone(OnWritesDoneFunc on_writes_done) {
     std::lock_guard<std::mutex> guard(mutex_);
@@ -458,6 +469,7 @@ class ClientReaderWriter {
     on_connect = nullptr;
     on_read = nullptr;
     on_read_done = nullptr;
+    on_write_ = nullptr;
     on_writes_done = nullptr;
     on_error = nullptr;
     lock.lock();
@@ -465,7 +477,7 @@ class ClientReaderWriter {
   }
 
  public:
-  void Write(W request) {
+  void Write(W request, int64_t id = 0) {
     std::lock_guard<std::mutex> guard(mutex_);
     SPDLOG_TRACE("[0x{}] Write: request={}", (void*)this,
                  request.DebugString());
@@ -478,6 +490,7 @@ class ClientReaderWriter {
                write_status_ == WriteStatus::WRITING) {
       RequestData req;
       req.is_done = false;
+      req.id = id;
       req.request = std::move(request);
       request_queue_.push_back(std::move(req));
     }
@@ -639,11 +652,16 @@ class ClientReaderWriter {
     if (write_status_ == WriteStatus::FINISHING) {
       // 書き込み完了。
       // あとは読み込みが全て終了したら終わり。
+      request_queue_.pop_front();
       write_status_ = WriteStatus::FINISHED;
       RunCallback(d.lock, "OnWritesDone", on_writes_done_);
       Done(d.lock);
       return;
     }
+
+    auto& req = request_queue_.front();
+    RunCallback(d.lock, "OnWrite", on_write_, std::move(req.request), req.id);
+    request_queue_.pop_front();
 
     // 書き込みが成功したら次のキューを処理する
     HandleRequestQueue();
@@ -653,8 +671,7 @@ class ClientReaderWriter {
     if (request_queue_.empty()) {
       write_status_ = WriteStatus::IDLE;
     } else {
-      auto req = std::move(request_queue_.front());
-      request_queue_.pop_front();
+      auto& req = request_queue_.front();
       if (!req.is_done) {
         // 通常の書き込みリクエスト
         streamer_->Write(req.request, &writer_thunk_);

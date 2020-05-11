@@ -39,6 +39,7 @@ if [ ! -e $SPDLOG_VERSION_FILE -o "$SPDLOG_VERSION" != "`cat $SPDLOG_VERSION_FIL
 fi
 
 if [ -z "$JOBS" ]; then
+  set +e
   # Linux
   JOBS=`nproc 2>/dev/null`
   if [ -z "$JOBS" ]; then
@@ -48,6 +49,7 @@ if [ -z "$JOBS" ]; then
       JOBS=1
     fi
   fi
+  set -e
 fi
 
 # CMake が古いとビルド出来ないので、CMake のバイナリをダウンロードする

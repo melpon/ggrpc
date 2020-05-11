@@ -33,7 +33,7 @@ class TestUnaryHandler
     resp.set_value(request.value() * 100);
     Context()->Finish(resp, grpc::Status::OK);
   }
-  void OnError(ggrpc::ServerResponseWriterError error) {}
+  void OnError(ggrpc::ServerResponseWriterError error) override {}
 };
 
 class TestBidiHandler

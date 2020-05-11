@@ -58,11 +58,13 @@ class ClientReaderWriter {
   typedef std::function<void(R)> OnReadFunc;
   typedef std::function<void(grpc::Status)> OnReadDoneFunc;
   typedef std::function<void(ClientReaderWriterError)> OnErrorFunc;
+  typedef std::function<void(W, int64_t)> OnWriteFunc;
   typedef std::function<void()> OnWritesDoneFunc;
 
   void SetOnConnect(OnConnectFunc on_connect);
   void SetOnRead(OnReadFunc on_read);
   void SetOnReadDone(OnReadDoneFunc on_read_done);
+  void SetOnWrite(OnWriteFunc on_write);
   void SetOnWritesDone(OnWritesDoneFunc on_writes_done);
   void SetOnError(OnErrorFunc on_error);
 
@@ -70,7 +72,7 @@ class ClientReaderWriter {
 
   void Close();
 
-  void Write(W request);
+  void Write(W request, int64_t id = 0);
   void WritesDone();
 };
 
@@ -156,5 +158,8 @@ class ServerReaderWriterHandler {
 ## TODO
 
 - ドキュメント書く
+- 書き込み成功のコールバックを実装する
+- アラーム機能を実装する
 - クライアントストリーミング、サーバストリーミングを実装する
+- spdlog 依存を無くす
 - pubsub 的なサンプルを書く
