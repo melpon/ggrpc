@@ -250,6 +250,7 @@ class ServerResponseWriterHandler {
     ++nesting_;
     lock.unlock();
     try {
+      SPDLOG_TRACE("call {}", funcname);
       (this->*mf)(std::forward<Args>(args)...);
     } catch (std::exception& e) {
       SPDLOG_ERROR("{} error: what={}", funcname, e.what());
@@ -665,6 +666,7 @@ class ServerReaderWriterHandler {
     ++nesting_;
     lock.unlock();
     try {
+      SPDLOG_TRACE("call {}", funcname);
       (this->*mf)(std::forward<Args>(args)...);
     } catch (std::exception& e) {
       SPDLOG_ERROR("{} error: what={}", funcname, e.what());
