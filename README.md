@@ -161,7 +161,6 @@ class ServerReaderWriterHandler {
 ## TODO
 
 - ドキュメント書く
-- アラーム機能を実装する
 - クライアントストリーミング、サーバストリーミングを実装する
 - spdlog 依存を無くす
 - pubsub 的なサンプルを書く
