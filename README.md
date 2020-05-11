@@ -90,6 +90,8 @@ public:
   template <class W, class R>
   std::shared_ptr<ClientReaderWriter<W, R>> CreateReaderWriter(
       typename ClientReaderWriter<W, R>::ConnectFunc connect);
+
+  std::shared_ptr<Alarm> CreateAlarm();
 };
 
 }
@@ -108,6 +110,7 @@ enum class ServerResponseWriterError {
 template <class W, class R>
 class ServerResponseWriterContext {
  public:
+  Server* GetServer() const;
   void Finish(W resp, grpc::Status status);
   void FinishWithError(grpc::Status status);
   void Close();
@@ -134,6 +137,7 @@ enum class ServerReaderWriterError {
 template <class W, class R>
 class ServerReaderWriterContext {
  public:
+  Server* GetServer() const;
   void Write(W resp, int64_t id);
   void Finish(grpc::Status status);
   void Close();
@@ -153,6 +157,39 @@ class ServerReaderWriterHandler {
   virtual void OnWrite(W response, int64_t id) {}
   virtual void OnFinish(grpc::Status status) {}
   virtual void OnError(ServerReaderWriterError error) {}
+};
+
+class Server {
+ public:
+  template <class H, class... Args>
+  void AddResponseWriterHandler(Args... args);
+
+  template <class H, class... Args>
+  void AddReaderWriterHandler(Args... args);
+
+  void Start(grpc::ServerBuilder& builder, int threads);
+  void Wait();
+  void Shutdown();
+
+  std::shared_ptr<Alarm> CreateAlarm();
+};
+
+}
+```
+
+共通:
+
+```cpp
+namespace ggrpc {
+
+class Alarm {
+ public:
+  typedef std::function<void(bool)> AlarmFunc;
+
+  bool Set(std::chrono::milliseconds deadline, AlarmFunc alarm);
+
+  void Cancel();
+  void Close();
 };
 
 }
