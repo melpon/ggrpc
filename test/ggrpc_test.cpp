@@ -74,6 +74,8 @@ class TestServer {
   ggrpc::Server server_;
 
  public:
+  ggrpc::Server* Server() { return &server_; }
+
   void Start(std::string address, int threads) {
     grpc::ServerBuilder builder;
     builder.AddListeningPort(address, grpc::InsecureServerCredentials());
@@ -102,6 +104,8 @@ class TestClientManager {
       : cm_(10), stub_(gg::Test::NewStub(channel)) {}
   void Start() { cm_.Start(); }
 
+  ggrpc::ClientManager* ClientManager() { return &cm_; }
+
   std::shared_ptr<UnaryClient> CreateUnary() {
     return cm_.CreateResponseReader<gg::UnaryRequest, gg::UnaryResponse>(
         [stub = stub_.get()](grpc::ClientContext* context,
@@ -118,12 +122,6 @@ class TestClientManager {
           return stub->AsyncBidi(context, cq, tag);
         });
   }
-
-  std::shared_ptr<ggrpc::ClientAlarm> CreateAlarm() {
-    return cm_.CreateAlarm();
-  }
-
-  void Shutdown() { cm_.Shutdown(); }
 };
 
 // Bidiクライアントの接続コールバック時にいろいろやってもちゃんと動くか
@@ -223,18 +221,15 @@ void test_server() {
   std::this_thread::sleep_for(std::chrono::seconds(1));
 }
 
-#define ASSERT(x) \
-  if (!(x)) std::exit(1)
+#define ASSERT(x)                  \
+  if (!(x)) {                      \
+    SPDLOG_ERROR("assert {}", #x); \
+    std::exit(1);                  \
+  }
 
-void test_client_alarm() {
-  auto channel = grpc::CreateChannel("localhost:50051",
-                                     grpc::InsecureChannelCredentials());
-  TestClientManager cm(channel, 10);
-  cm.Start();
-
+void _test_alarm(std::shared_ptr<ggrpc::Alarm> alarm) {
   int n = 0;
   int m = 0;
-  auto alarm = cm.CreateAlarm();
 
   n = 0;
   alarm->Set(std::chrono::milliseconds(100), [&n](bool ok) { n = ok ? 1 : 2; });
@@ -297,19 +292,53 @@ void test_client_alarm() {
   alarm->Cancel();
   std::this_thread::sleep_for(std::chrono::seconds(1));
   ASSERT(n == 2 && m == 2);
+}
+
+void test_client_alarm() {
+  auto channel = grpc::CreateChannel("localhost:50051",
+                                     grpc::InsecureChannelCredentials());
+  TestClientManager cm(channel, 10);
+  cm.Start();
+
+  auto alarm = cm.ClientManager()->CreateAlarm();
+  _test_alarm(alarm);
 
   // シャットダウンのテスト
-  n = 0;
+  int n = 0;
   alarm->Set(std::chrono::milliseconds(100), [&n, alarm](bool ok) {
+    n = ok ? 1 : 2;
     if (!ok) {
-      bool b = alarm->Set(std::chrono::milliseconds(100),
-                          [&n](bool ok) { n = ok ? 1 : 2; });
-      ASSERT(b);
+      bool b = alarm->Set(std::chrono::milliseconds(100), [](bool ok) {});
+      ASSERT(b == false);
     }
   });
-  cm.Shutdown();
+  cm.ClientManager()->Shutdown();
+  ASSERT(n == 2);
   bool b = alarm->Set(std::chrono::milliseconds(100), [](bool ok) {});
-  ASSERT(!b);
+  ASSERT(b == false);
+}
+
+void test_server_alarm() {
+  TestServer server;
+  server.Start("0.0.0.0:50051", 10);
+  std::this_thread::sleep_for(std::chrono::seconds(1));
+
+  auto alarm = server.Server()->CreateAlarm();
+  _test_alarm(alarm);
+
+  // シャットダウンのテスト
+  int n = 0;
+  alarm->Set(std::chrono::milliseconds(100), [&n, alarm](bool ok) {
+    n = ok ? 1 : 2;
+    if (!ok) {
+      bool b = alarm->Set(std::chrono::milliseconds(100), [](bool ok) {});
+      ASSERT(b == false);
+    }
+  });
+  server.Server()->Shutdown();
+  ASSERT(n == 2);
+  bool b = alarm->Set(std::chrono::milliseconds(100), [](bool ok) {});
+  ASSERT(b == false);
 }
 
 int main() {
@@ -319,6 +348,7 @@ int main() {
   test_client_unary();
   test_server();
   test_client_alarm();
+  test_server_alarm();
 
   //std::unique_ptr<TestServer> server(new TestServer());
   //server->Start("0.0.0.0:50051", 10);

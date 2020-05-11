@@ -13,7 +13,6 @@
 #include <tuple>
 
 // gRPC
-#include <grpcpp/alarm.h>
 #include <grpcpp/grpcpp.h>
 #include <grpcpp/support/async_stream.h>
 #include <grpcpp/support/async_unary_call.h>
@@ -21,6 +20,7 @@
 // spdlog
 #include <spdlog/spdlog.h>
 
+#include "alarm.h"
 #include "handler.h"
 
 namespace ggrpc {
@@ -44,6 +44,7 @@ class ServerResponseWriterContext {
 
  public:
   ~ServerResponseWriterContext();
+  Server* GetServer() const;
   void Finish(W resp, grpc::Status status);
   void FinishWithError(grpc::Status status);
   void Close();
@@ -52,6 +53,7 @@ class ServerResponseWriterContext {
 template <class W, class R>
 class ServerResponseWriterHandler {
   mutable std::mutex mutex_;
+  Server* server_;
   grpc::ServerCompletionQueue* cq_;
 
   grpc::ServerContext server_context_;
@@ -137,9 +139,10 @@ class ServerResponseWriterHandler {
   // ServerResponseWriterContext への参照が消えると自身の Release() が呼ばれるように仕込む
   // Close() や Finish() を呼ぶと自身の持つ context は nullptr になる
   // 誰かが参照してれば引き続き読み書きできる
-  void Init(grpc::ServerCompletionQueue* cq,
+  void Init(Server* server, grpc::ServerCompletionQueue* cq,
             std::function<void(grpc::ServerCompletionQueue*)> gen_handler,
             std::shared_ptr<ServerResponseWriterContext<W, R>> context) {
+    server_ = server;
     cq_ = cq;
     gen_handler_ = std::move(gen_handler);
     context_ = context;
@@ -176,6 +179,8 @@ class ServerResponseWriterHandler {
 
  private:
   void DoClose(std::unique_lock<std::mutex>& lock) {
+    server_ = nullptr;
+
     // Listen 中ならサーバのシャットダウンで終わるのでキャンセル状態にして待つだけ
     if (status_ == Status::LISTENING) {
       status_ = Status::CANCELING;
@@ -213,6 +218,8 @@ class ServerResponseWriterHandler {
   }
 
  private:
+  Server* GetServer() const { return server_; }
+
   void Finish(W resp, grpc::Status status) {
     std::lock_guard<std::mutex> guard(mutex_);
     SPDLOG_TRACE("[0x{}] Finish: {}", (void*)this, resp.DebugString());
@@ -381,6 +388,10 @@ ServerResponseWriterContext<W, R>::~ServerResponseWriterContext() {
   p_->Release();
 }
 template <class W, class R>
+Server* ServerResponseWriterContext<W, R>::GetServer() const {
+  return p_->GetServer();
+}
+template <class W, class R>
 void ServerResponseWriterContext<W, R>::Finish(W resp, grpc::Status status) {
   p_->Finish(std::move(resp), status);
 }
@@ -409,6 +420,7 @@ class ServerReaderWriterContext {
 
  public:
   ~ServerReaderWriterContext();
+  Server* GetServer() const;
   void Write(W resp, int64_t id = 0);
   void Finish(grpc::Status status);
   void Close();
@@ -417,6 +429,7 @@ class ServerReaderWriterContext {
 template <class W, class R>
 class ServerReaderWriterHandler {
   mutable std::mutex mutex_;
+  Server* server_;
   grpc::ServerCompletionQueue* cq_;
 
   grpc::ServerContext server_context_;
@@ -523,9 +536,10 @@ class ServerReaderWriterHandler {
   // ServerResponseWriterContext への参照が消えると自身の Release() が呼ばれるように仕込む
   // Close() や Finish() を呼ぶと自身の持つ context は nullptr になる
   // 誰かが参照してれば引き続き読み書きできる
-  void Init(grpc::ServerCompletionQueue* cq,
+  void Init(Server* server, grpc::ServerCompletionQueue* cq,
             std::function<void(grpc::ServerCompletionQueue*)> gen_handler,
             std::shared_ptr<ServerReaderWriterContext<W, R>> context) {
+    server_ = server;
     cq_ = cq;
     gen_handler_ = std::move(gen_handler);
     context_ = context;
@@ -561,6 +575,8 @@ class ServerReaderWriterHandler {
 
  private:
   void DoClose(std::unique_lock<std::mutex>& lock) {
+    server_ = nullptr;
+
     // 読み書き中ならキャンセルする
     if (read_status_ == ReadStatus::READING ||
         write_status_ == WriteStatus::WRITING ||
@@ -609,6 +625,8 @@ class ServerReaderWriterHandler {
   }
 
  private:
+  Server* GetServer() const { return server_; }
+
   void Write(W resp, int64_t id) {
     std::lock_guard<std::mutex> guard(mutex_);
 
@@ -870,6 +888,10 @@ ServerReaderWriterContext<W, R>::~ServerReaderWriterContext() {
   p_->Release();
 }
 template <class W, class R>
+Server* ServerReaderWriterContext<W, R>::GetServer() const {
+  return p_->GetServer();
+}
+template <class W, class R>
 void ServerReaderWriterContext<W, R>::Write(W resp, int64_t id) {
   p_->Write(std::move(resp), id);
 }
@@ -926,7 +948,7 @@ class Server {
       H* handler = new_from_tuple<H>(std::move(targs));
       auto context = std::shared_ptr<ServerResponseWriterContext<W, R>>(
           new ServerResponseWriterContext<W, R>(handler));
-      handler->Init(cq, gh->gen_handler, context);
+      handler->Init(this, cq, gh->gen_handler, context);
       Collect();
       holders_.push_back(
           std::unique_ptr<Holder>(new ResponseWriterHolder<W, R>(context)));
@@ -961,7 +983,7 @@ class Server {
       H* handler = new_from_tuple<H>(std::move(targs));
       auto context = std::shared_ptr<ServerReaderWriterContext<W, R>>(
           new ServerReaderWriterContext<W, R>(handler));
-      handler->Init(cq, gh->gen_handler, context);
+      handler->Init(this, cq, gh->gen_handler, context);
       Collect();
       holders_.push_back(
           std::unique_ptr<Holder>(new ReaderWriterHolder<W, R>(context)));
@@ -1039,6 +1061,27 @@ class Server {
     SPDLOG_INFO("Server Shutdown completed");
   }
 
+  std::shared_ptr<Alarm> CreateAlarm() {
+    std::lock_guard<std::mutex> guard(mutex_);
+
+    // Start してない
+    if (threads_.size() == 0) {
+      return nullptr;
+    }
+    if (shutdown_) {
+      return nullptr;
+    }
+
+    Collect();
+
+    auto id = next_id_++;
+    auto cq = cqs_[id % cqs_.size()].get();
+
+    std::shared_ptr<Alarm> p(new Alarm(cq), [](Alarm* p) { p->Release(); });
+    holders_.push_back(std::unique_ptr<Holder>(new AlarmHolder(p)));
+    return p;
+  }
+
  private:
   void HandleRpcs(grpc::ServerCompletionQueue* cq) {
     for (auto& gh : gen_handlers_) {
@@ -1094,6 +1137,17 @@ class Server {
     }
     bool Expired() override { return wp.expired(); }
   };
+  struct AlarmHolder : Holder {
+    std::weak_ptr<Alarm> wp;
+    AlarmHolder(std::shared_ptr<Alarm> p) : wp(p) {}
+    void Close() override {
+      auto sp = wp.lock();
+      if (sp) {
+        sp->Close();
+      }
+    }
+    bool Expired() override { return wp.expired(); }
+  };
   std::vector<std::unique_ptr<Holder>> holders_;
 
   std::vector<std::unique_ptr<grpc::ServerCompletionQueue>> cqs_;
@@ -1107,6 +1161,7 @@ class Server {
   std::vector<std::unique_ptr<GenHandler>> gen_handlers_;
 
   bool shutdown_ = false;
+  int next_id_ = 0;
 };
 
 }  // namespace ggrpc

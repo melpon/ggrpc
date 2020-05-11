@@ -13,7 +13,6 @@
 #include <thread>
 
 // gRPC
-#include <grpcpp/alarm.h>
 #include <grpcpp/grpcpp.h>
 #include <grpcpp/support/async_stream.h>
 #include <grpcpp/support/async_unary_call.h>
@@ -21,6 +20,7 @@
 // spdlog
 #include <spdlog/spdlog.h>
 
+#include "alarm.h"
 #include "handler.h"
 
 namespace ggrpc {
@@ -689,178 +689,6 @@ class ClientReaderWriter {
   }
 };
 
-class ClientAlarm {
- public:
-  typedef std::function<void(bool)> AlarmFunc;
-
- private:
-  struct NotifierThunk : Handler {
-    ClientAlarm* p;
-    NotifierThunk(ClientAlarm* p) : p(p) {}
-    void Proceed(bool ok) override { p->ProceedToNotify(ok); }
-  };
-  NotifierThunk notifier_thunk_;
-  friend class NotifierThunk;
-
-  grpc::CompletionQueue* cq_;
-
-  bool close_ = false;
-  bool release_ = false;
-  int nesting_ = 0;
-  std::mutex mutex_;
-
-  grpc::Alarm alarm_;
-  struct AlarmData {
-    bool canceled = false;
-    std::chrono::milliseconds deadline;
-    AlarmFunc alarm;
-  };
-  std::deque<AlarmData> alarm_queue_;
-
-  struct SafeDeleter {
-    ClientAlarm* p;
-    std::unique_lock<std::mutex> lock;
-    SafeDeleter(ClientAlarm* p) : p(p), lock(p->mutex_) {}
-    ~SafeDeleter() {
-      bool del = p->release_ && p->alarm_queue_.empty() && p->nesting_ == 0;
-      lock.unlock();
-      if (del) {
-        delete p;
-      }
-    }
-  };
-  friend struct SafeDeleter;
-
-  ClientAlarm(grpc::CompletionQueue* cq) : notifier_thunk_(this), cq_(cq) {}
-  ~ClientAlarm() { SPDLOG_TRACE("[0x{}] deleted", (void*)this); }
-
-  // コピー、ムーブ禁止
-  ClientAlarm(const ClientAlarm&) = delete;
-  ClientAlarm(ClientAlarm&&) = delete;
-  ClientAlarm& operator=(const ClientAlarm&) = delete;
-  ClientAlarm& operator=(ClientAlarm&&) = delete;
-
- public:
-  // アラームを設定する。
-  // 既に設定済みのアラームがある場合、そのアラームはキャンセルされ、新しいアラームが設定される。
-  bool Set(std::chrono::milliseconds deadline, AlarmFunc alarm) {
-    std::lock_guard<std::mutex> guard(mutex_);
-
-    if (close_) {
-      return false;
-    }
-
-    AlarmData data;
-    data.deadline = deadline;
-    data.alarm = alarm;
-
-    if (alarm_queue_.empty()) {
-      auto timepoint = std::chrono::system_clock::now() + deadline;
-      alarm_.Set(cq_, timepoint, &notifier_thunk_);
-    } else {
-      DoCancel();
-    }
-
-    alarm_queue_.push_back(std::move(data));
-    return true;
-  }
-
- private:
-  void Release() {
-    SafeDeleter d(this);
-
-    release_ = true;
-    close_ = true;
-
-    DoCancel();
-  }
-  friend class ClientManager;
-
- public:
-  // アラームをキャンセルする
-  void Cancel() {
-    SafeDeleter d(this);
-
-    DoCancel();
-  }
-
-  // 全ての設定済みアラームをキャンセルして、
-  // Set を呼び出しても新しくアラームを設定できなくする
-  void Close() {
-    SafeDeleter d(this);
-
-    close_ = true;
-
-    DoCancel();
-  }
-
- private:
-  void DoCancel() {
-    if (alarm_queue_.empty()) {
-      return;
-    }
-
-    // 全てキャンセル状態にする
-    for (auto& data : alarm_queue_) {
-      data.canceled = true;
-    }
-    // 現在設定されてるアラームをキャンセルする
-    alarm_.Cancel();
-  }
-
- private:
-  template <class F, class... Args>
-  void RunCallback(std::unique_lock<std::mutex>& lock, std::string funcname,
-                   F f, Args&&... args) {
-    // 普通にコールバックするとデッドロックの可能性があるので
-    // unlock してからコールバックする。
-    // 再度ロックした時に状態が変わってる可能性があるので注意すること。
-    if (f) {
-      ++nesting_;
-      lock.unlock();
-      try {
-        SPDLOG_TRACE("call {}", funcname);
-        f(std::forward<Args>(args)...);
-      } catch (std::exception& e) {
-        SPDLOG_ERROR("{} error: what={}", funcname, e.what());
-      } catch (...) {
-        SPDLOG_ERROR("{} error", funcname);
-      }
-      f = nullptr;
-      lock.lock();
-      --nesting_;
-    }
-  }
-
-  void ProceedToNotify(bool ok) {
-    SafeDeleter d(this);
-
-    assert(!alarm_queue_.empty());
-
-    auto data = std::move(alarm_queue_.front());
-    // タイムアウトかキャンセルかのコールバックを呼び出す
-    RunCallback(d.lock, "OnAlarm", std::move(data.alarm),
-                !(data.canceled || !ok));
-    alarm_queue_.pop_front();
-    // キューにあるアラームで、キャンセル済みのがあったらどんどんキャンセルしていく
-    // クローズ済みだった場合は全てキャンセルする
-    while (!alarm_queue_.empty() && (alarm_queue_.front().canceled || close_)) {
-      data = std::move(alarm_queue_.front());
-      RunCallback(d.lock, "OnAlarm", std::move(data.alarm), false);
-      alarm_queue_.pop_front();
-    }
-
-    if (alarm_queue_.empty()) {
-      return;
-    }
-
-    // 有効なアラームがあったので、次のアラームをセット
-    auto timepoint =
-        std::chrono::system_clock::now() + alarm_queue_.front().deadline;
-    alarm_.Set(cq_, timepoint, &notifier_thunk_);
-  }
-};
-
 class ClientManager {
   std::mutex mutex_;
 
@@ -904,8 +732,8 @@ class ClientManager {
     bool Expired() override { return wp.expired(); }
   };
   struct AlarmHolder : Holder {
-    std::weak_ptr<ClientAlarm> wp;
-    AlarmHolder(std::shared_ptr<ClientAlarm> p) : wp(p) {}
+    std::weak_ptr<Alarm> wp;
+    AlarmHolder(std::shared_ptr<Alarm> p) : wp(p) {}
     void Close() override {
       auto sp = wp.lock();
       if (sp) {
@@ -1017,7 +845,7 @@ class ClientManager {
     return p;
   }
 
-  std::shared_ptr<ClientAlarm> CreateAlarm() {
+  std::shared_ptr<Alarm> CreateAlarm() {
     std::lock_guard<std::mutex> guard(mutex_);
 
     Collect();
@@ -1025,8 +853,7 @@ class ClientManager {
     auto client_id = next_client_id_++;
     auto cq = &threads_[client_id % threads_.size()].cq;
 
-    std::shared_ptr<ClientAlarm> p(new ClientAlarm(cq),
-                                   [](ClientAlarm* p) { p->Release(); });
+    std::shared_ptr<Alarm> p(new Alarm(cq), [](Alarm* p) { p->Release(); });
     holders_.push_back(std::unique_ptr<Holder>(new AlarmHolder(p)));
     return p;
   }
