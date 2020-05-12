@@ -379,7 +379,7 @@ class ClientReaderWriter {
         write_status_ != WriteStatus::INIT) {
       return;
     }
-    on_write_ = std::move(on_write_);
+    on_write_ = std::move(on_write);
   }
   void SetOnWritesDone(OnWritesDoneFunc on_writes_done) {
     std::lock_guard<std::mutex> guard(mutex_);
@@ -395,7 +395,7 @@ class ClientReaderWriter {
         write_status_ != WriteStatus::INIT) {
       return;
     }
-    on_error_ = std::move(on_error_);
+    on_error_ = std::move(on_error);
   }
 
   void Connect() {
