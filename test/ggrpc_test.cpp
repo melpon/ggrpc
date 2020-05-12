@@ -13,6 +13,12 @@
 #include "ggrpc.grpc.pb.h"
 #include "ggrpc.pb.h"
 
+#define ASSERT(x)                  \
+  if (!(x)) {                      \
+    SPDLOG_ERROR("assert {}", #x); \
+    std::exit(1);                  \
+  }
+
 class TestUnaryHandler
     : public ggrpc::ServerResponseWriterHandler<gg::UnaryResponse,
                                                 gg::UnaryRequest> {
@@ -57,7 +63,7 @@ class TestBidiHandler
   void OnRead(gg::BidiRequest req) override {
     SPDLOG_TRACE("received BidiRequest {}", req.DebugString());
     gg::BidiResponse resp;
-    resp.set_value(2);
+    resp.set_value(req.value() * 2);
     Context()->Write(resp);
   }
   void OnReadDoneOrError() override {
@@ -177,14 +183,17 @@ void test_client_bidi_connect_callback() {
   }
 
   {
+    std::atomic<int> n = 0;
     auto bidi = cm.CreateBidi();
     bidi->SetOnConnect([bidi]() {
       gg::BidiRequest req;
       req.set_value(100);
       bidi->Write(req);
     });
+    bidi->SetOnRead([&n](const gg::BidiResponse& resp) { n += resp.value(); });
     bidi->Connect();
     std::this_thread::sleep_for(std::chrono::seconds(1));
+    ASSERT(n == 201);
   }
 
   {
@@ -238,12 +247,6 @@ void test_server() {
   server.Start("0.0.0.0:50051", 1);
   std::this_thread::sleep_for(std::chrono::seconds(1));
 }
-
-#define ASSERT(x)                  \
-  if (!(x)) {                      \
-    SPDLOG_ERROR("assert {}", #x); \
-    std::exit(1);                  \
-  }
 
 void _test_alarm(std::shared_ptr<ggrpc::Alarm> alarm) {
   std::atomic<int> n = 0;

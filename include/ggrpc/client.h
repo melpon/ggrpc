@@ -492,12 +492,13 @@ class ClientReaderWriter {
       req.is_done = false;
       req.id = id;
       req.request = std::move(request);
-      request_queue_.push_back(std::move(req));
 
       if (write_status_ == WriteStatus::IDLE) {
-        streamer_->Write(request, &writer_thunk_);
+        streamer_->Write(req.request, &writer_thunk_);
         write_status_ = WriteStatus::WRITING;
       }
+
+      request_queue_.push_back(std::move(req));
     }
   }
 
