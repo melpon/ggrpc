@@ -2,6 +2,144 @@
 
 ggrpc は、マルチスレッドで安全に動作し、グレースフルシャットダウンを可能にした gRPC C++ クライアントです。
 
+## 使い方
+
+proto ファイル:
+
+```proto
+syntax = "proto3";
+
+package helloworld;
+
+service Greeter {
+  rpc SayHello(HelloRequest) returns (HelloResponse) {}
+}
+
+message HelloRequest {
+  string name = 1;
+}
+
+message HelloResponse {
+  string message = 1;
+}
+```
+
+クライアント側:
+
+```cpp
+#include <chrono>
+
+// ggrpc
+#include <ggrpc/client.h>
+
+#include "helloworld.grpc.pb.h"
+
+using SayHelloClient = ggrpc::ClientResponseReader<helloworld::HelloRequest,
+                                                   helloworld::HelloResponse>;
+
+int main() {
+  // スレッド数1でクライアントマネージャを作る
+  ggrpc::ClientManager cm(1);
+  cm.Start();
+
+  // 接続先の stub を作る
+  std::shared_ptr<grpc::Channel> channel = grpc::CreateChannel(
+      "localhost:50051", grpc::InsecureChannelCredentials());
+  std::unique_ptr<helloworld::Greeter::Stub> stub(
+      helloworld::Greeter::NewStub(channel));
+
+  // SayHello リクエストを送るクライアントを作る
+  SayHelloClient::RequestFunc request = [stub = stub.get()](
+                                            grpc::ClientContext* context,
+                                            const helloworld::HelloRequest& req,
+                                            grpc::CompletionQueue* cq) {
+    return stub->AsyncSayHello(context, req, cq);
+  };
+  std::shared_ptr<SayHelloClient> client =
+      cm.CreateResponseReader<helloworld::HelloRequest,
+                              helloworld::HelloResponse>(request);
+
+  // レスポンスが返ってきた時の処理
+  client->SetOnResponse(
+      [](helloworld::HelloResponse resp, grpc::Status status) {
+        std::cout << resp.message() << std::endl;
+      });
+
+  // リクエスト送信
+  helloworld::HelloRequest req;
+  req.set_name("melpon");
+  client->Request(req);
+
+  std::this_thread::sleep_for(std::chrono::seconds(1));
+
+  // 送信直後、レスポンスを受け取る前にクライアントマネージャを Shutdown しても大丈夫
+  // （cm 経由で作った全てのクライアントに対して client->Close() する）
+  req.set_name("melponnn");
+  client->Request(req);
+  cm.Shutdown();
+}
+```
+
+サーバ側:
+
+```cpp
+#include <ggrpc/server.h>
+
+#include "helloworld.grpc.pb.h"
+
+class SayHelloHandler
+    : public ggrpc::ServerResponseWriterHandler<helloworld::HelloResponse,
+                                                helloworld::HelloRequest> {
+  helloworld::Greeter::AsyncService* service_;
+
+ public:
+  SayHelloHandler(helloworld::Greeter::AsyncService* service)
+      : service_(service) {}
+
+  // サーバ開始時にインスタンスが作られて Request() が呼ばれる。
+  // Request() では接続待ち状態にする処理を書くこと。
+  void Request(
+      grpc::ServerContext* context, helloworld::HelloRequest* request,
+      grpc::ServerAsyncResponseWriter<helloworld::HelloResponse>* writer,
+      grpc::ServerCompletionQueue* cq, void* tag) override {
+    service_->RequestSayHello(context, request, writer, cq, cq, tag);
+  }
+  // 接続が確立すると OnAccept() が呼ばれる。
+  void OnAccept(helloworld::HelloRequest req) override {
+    helloworld::HelloResponse resp;
+    resp.set_message("Hello, " + req.name());
+    Context()->Finish(resp, grpc::Status::OK);
+  }
+  void OnError(ggrpc::ServerResponseWriterError error) override {}
+};
+
+int main() {
+  ggrpc::Server server;
+  helloworld::Greeter::AsyncService service;
+
+  grpc::ServerBuilder builder;
+  builder.AddListeningPort("127.0.0.1:50051",
+                           grpc::InsecureServerCredentials());
+  builder.RegisterService(&service);
+
+  // リクエストハンドラの登録
+  server.AddResponseWriterHandler<SayHelloHandler>(&service);
+
+  // スレッド数1でサーバを起動して待つ
+  server.Start(builder, 1);
+  server.Wait();
+}
+```
+
+実行:
+
+```
+$ ./helloworld-server
+
+$ ./helloworld-client
+Hello, melpon
+```
+
 ## ルール
 
 - `ClientManager` が死んだら、その `ClientManager` で生成した接続は全て安全に切断される
