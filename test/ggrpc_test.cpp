@@ -178,6 +178,24 @@ void test_client_bidi_connect_callback() {
 
   {
     auto bidi = cm.CreateBidi();
+    bidi->SetOnConnect([bidi]() {
+      gg::BidiRequest req;
+      req.set_value(100);
+      bidi->Write(req);
+    });
+    bidi->Connect();
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+  }
+
+  {
+    auto bidi = cm.CreateBidi();
+    bidi->SetOnConnect([bidi]() { bidi->WritesDone(); });
+    bidi->Connect();
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+  }
+
+  {
+    auto bidi = cm.CreateBidi();
     bidi->SetOnConnect([bidi]() {});
     bidi->Connect();
   }

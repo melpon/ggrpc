@@ -484,32 +484,38 @@ class ClientReaderWriter {
     SPDLOG_TRACE("[0x{}] Write: request={}", (void*)this,
                  request.DebugString());
 
-    if (write_status_ == WriteStatus::IDLE) {
-      streamer_->Write(request, &writer_thunk_);
-      write_status_ = WriteStatus::WRITING;
-    } else if (write_status_ == WriteStatus::INIT ||
-               write_status_ == WriteStatus::CONNECTING ||
-               write_status_ == WriteStatus::WRITING) {
+    if (write_status_ == WriteStatus::IDLE ||
+        write_status_ == WriteStatus::INIT ||
+        write_status_ == WriteStatus::CONNECTING ||
+        write_status_ == WriteStatus::WRITING) {
       RequestData req;
       req.is_done = false;
       req.id = id;
       req.request = std::move(request);
       request_queue_.push_back(std::move(req));
+
+      if (write_status_ == WriteStatus::IDLE) {
+        streamer_->Write(request, &writer_thunk_);
+        write_status_ = WriteStatus::WRITING;
+      }
     }
   }
 
   void WritesDone() {
     std::lock_guard<std::mutex> guard(mutex_);
 
-    if (write_status_ == WriteStatus::IDLE) {
-      streamer_->WritesDone(&writer_thunk_);
-      write_status_ = WriteStatus::FINISHING;
-    } else if (write_status_ == WriteStatus::INIT ||
-               write_status_ == WriteStatus::CONNECTING ||
-               write_status_ == WriteStatus::WRITING) {
+    if (write_status_ == WriteStatus::IDLE ||
+        write_status_ == WriteStatus::INIT ||
+        write_status_ == WriteStatus::CONNECTING ||
+        write_status_ == WriteStatus::WRITING) {
       RequestData req;
       req.is_done = true;
       request_queue_.push_back(std::move(req));
+
+      if (write_status_ == WriteStatus::IDLE) {
+        streamer_->WritesDone(&writer_thunk_);
+        write_status_ = WriteStatus::FINISHING;
+      }
     }
   }
 
@@ -638,6 +644,7 @@ class ClientReaderWriter {
     assert(write_status_ == WriteStatus::WRITING ||
            write_status_ == WriteStatus::FINISHING ||
            write_status_ == WriteStatus::CANCELING);
+    assert(!request_queue_.empty());
 
     if (write_status_ == WriteStatus::CANCELING) {
       write_status_ = WriteStatus::FINISHED;
