@@ -267,6 +267,34 @@ class ServerResponseWriterHandler {
   virtual void OnError(ServerResponseWriterError error) {}
 };
 
+// サーバストリーミング用
+enum class ServerWriterError {
+  WRITE,
+};
+
+template <class W, class R>
+class ServerWriterContext {
+ public:
+  Server* GetServer() const;
+  void Write(W resp, int64_t id = 0);
+  void Finish(grpc::Status status);
+  void Close();
+};
+
+template <class W, class R>
+class ServerWriterHandler {
+ public:
+  std::shared_ptr<ServerWriterContext<W, R>> Context() const;
+
+  virtual void Request(grpc::ServerContext* context, R* request,
+                       grpc::ServerAsyncWriter<W>* writer,
+                       grpc::ServerCompletionQueue* cq, void* tag) = 0;
+  virtual void OnAccept(R request) {}
+  virtual void OnWrite(W response, int64_t id) {}
+  virtual void OnFinish(grpc::Status status) {}
+  virtual void OnError(ServerWriterError error) {}
+};
+
 // 双方向ストリーミング用
 enum class ServerReaderWriterError {
   WRITE,
@@ -336,6 +364,6 @@ class Alarm {
 ## TODO
 
 - ドキュメント書く
-- クライアントストリーミング、サーバストリーミングを実装する
+- クライアントストリーミングを実装する
 - spdlog 依存を無くす
 - pubsub 的なサンプルを書く
