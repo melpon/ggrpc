@@ -11,6 +11,7 @@ package gg;
 service Test {
   rpc Unary(UnaryRequest) returns (UnaryResponse) {}
   rpc Bidi(stream BidiRequest) returns (stream BidiResponse) {}
+  rpc Sstream(SstreamRequest) returns (stream SstreamResponse) {}
 }
 
 message UnaryRequest {
@@ -26,5 +27,13 @@ message BidiRequest {
 }
 
 message BidiResponse {
+  int32 value = 1;
+}
+
+message SstreamRequest {
+  int32 value = 1;
+}
+
+message SstreamResponse {
   int32 value = 1;
 }
