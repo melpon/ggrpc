@@ -15,6 +15,7 @@
 #include <spdlog/spdlog.h>
 
 #include "../handler.h"
+#include "../util.h"
 
 namespace ggrpc {
 
@@ -63,29 +64,14 @@ class ServerResponseWriterHandler {
   };
   ResponseData response_;
 
-  struct AcceptorThunk : Handler {
-    ServerResponseWriterHandler* p;
-    AcceptorThunk(ServerResponseWriterHandler* p) : p(p) {}
-    void Proceed(bool ok) override { p->ProceedToAccept(ok); }
-  };
-  AcceptorThunk acceptor_thunk_;
-  friend class AcceptorThunk;
+  detail::AcceptorThunk<ServerResponseWriterHandler> acceptor_thunk_;
+  friend class detail::AcceptorThunk<ServerResponseWriterHandler>;
 
-  struct WriterThunk : Handler {
-    ServerResponseWriterHandler* p;
-    WriterThunk(ServerResponseWriterHandler* p) : p(p) {}
-    void Proceed(bool ok) override { p->ProceedToWrite(ok); }
-  };
-  WriterThunk writer_thunk_;
-  friend class WriterThunk;
+  detail::WriterThunk<ServerResponseWriterHandler> writer_thunk_;
+  friend class detail::WriterThunk<ServerResponseWriterHandler>;
 
-  struct NotifierThunk : Handler {
-    ServerResponseWriterHandler* p;
-    NotifierThunk(ServerResponseWriterHandler* p) : p(p) {}
-    void Proceed(bool ok) override { p->ProceedToNotify(ok); }
-  };
-  NotifierThunk notifier_thunk_;
-  friend class NotifierThunk;
+  detail::NotifierThunk<ServerResponseWriterHandler> notifier_thunk_;
+  friend class detail::NotifierThunk<ServerResponseWriterHandler>;
 
   // 状態マシン
   enum class Status { LISTENING, IDLE, FINISHING, CANCELING, FINISHED };
@@ -242,31 +228,9 @@ class ServerResponseWriterHandler {
   template <class MemF, class... Args>
   void RunCallback(std::unique_lock<std::mutex>& lock, std::string funcname,
                    MemF mf, Args&&... args) {
-    // コールバック中は tmp_context_ を有効にする
-    if (nesting_ == 0) {
-      tmp_context_ = context_;
-    }
-    ++nesting_;
-    lock.unlock();
-    try {
-      SPDLOG_TRACE("call {}", funcname);
-      (this->*mf)(std::forward<Args>(args)...);
-    } catch (std::exception& e) {
-      SPDLOG_ERROR("{} error: what={}", funcname, e.what());
-    } catch (...) {
-      SPDLOG_ERROR("{} error", funcname);
-    }
-    lock.lock();
-    --nesting_;
-
-    if (nesting_ == 0) {
-      auto context = std::move(tmp_context_);
-      ++nesting_;
-      lock.unlock();
-      context.reset();
-      lock.lock();
-      --nesting_;
-    }
+    detail::RunCallbackServer(lock, nesting_, tmp_context_, context_,
+                              std::move(funcname), this, mf,
+                              std::forward<Args>(args)...);
   }
 
   void ProceedToAccept(bool ok) {

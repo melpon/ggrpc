@@ -16,6 +16,7 @@
 #include <spdlog/spdlog.h>
 
 #include "../handler.h"
+#include "../util.h"
 
 namespace ggrpc {
 
@@ -65,37 +66,17 @@ class ServerReaderWriterHandler {
   };
   std::deque<ResponseData> response_queue_;
 
-  struct AcceptorThunk : Handler {
-    ServerReaderWriterHandler* p;
-    AcceptorThunk(ServerReaderWriterHandler* p) : p(p) {}
-    void Proceed(bool ok) override { p->ProceedToAccept(ok); }
-  };
-  AcceptorThunk acceptor_thunk_;
-  friend class AcceptorThunk;
+  detail::AcceptorThunk<ServerReaderWriterHandler> acceptor_thunk_;
+  friend class detail::AcceptorThunk<ServerReaderWriterHandler>;
 
-  struct ReaderThunk : Handler {
-    ServerReaderWriterHandler* p;
-    ReaderThunk(ServerReaderWriterHandler* p) : p(p) {}
-    void Proceed(bool ok) override { p->ProceedToRead(ok); }
-  };
-  ReaderThunk reader_thunk_;
-  friend class ReaderThunk;
+  detail::ReaderThunk<ServerReaderWriterHandler> reader_thunk_;
+  friend class detail::ReaderThunk<ServerReaderWriterHandler>;
 
-  struct WriterThunk : Handler {
-    ServerReaderWriterHandler* p;
-    WriterThunk(ServerReaderWriterHandler* p) : p(p) {}
-    void Proceed(bool ok) override { p->ProceedToWrite(ok); }
-  };
-  WriterThunk writer_thunk_;
-  friend class WriterThunk;
+  detail::WriterThunk<ServerReaderWriterHandler> writer_thunk_;
+  friend class detail::WriterThunk<ServerReaderWriterHandler>;
 
-  struct NotifierThunk : Handler {
-    ServerReaderWriterHandler* p;
-    NotifierThunk(ServerReaderWriterHandler* p) : p(p) {}
-    void Proceed(bool ok) override { p->ProceedToNotify(ok); }
-  };
-  NotifierThunk notifier_thunk_;
-  friend class NotifierThunk;
+  detail::NotifierThunk<ServerReaderWriterHandler> notifier_thunk_;
+  friend class detail::NotifierThunk<ServerReaderWriterHandler>;
 
   // 状態マシン
   enum class ReadStatus { LISTENING, READING, CANCELING, FINISHED };
@@ -293,31 +274,9 @@ class ServerReaderWriterHandler {
   template <class MemF, class... Args>
   void RunCallback(std::unique_lock<std::mutex>& lock, std::string funcname,
                    MemF mf, Args&&... args) {
-    // コールバック中は tmp_context_ を有効にする
-    if (nesting_ == 0) {
-      tmp_context_ = context_;
-    }
-    ++nesting_;
-    lock.unlock();
-    try {
-      SPDLOG_TRACE("call {}", funcname);
-      (this->*mf)(std::forward<Args>(args)...);
-    } catch (std::exception& e) {
-      SPDLOG_ERROR("{} error: what={}", funcname, e.what());
-    } catch (...) {
-      SPDLOG_ERROR("{} error", funcname);
-    }
-    lock.lock();
-    --nesting_;
-
-    if (nesting_ == 0) {
-      auto context = std::move(tmp_context_);
-      ++nesting_;
-      lock.unlock();
-      context.reset();
-      lock.lock();
-      --nesting_;
-    }
+    detail::RunCallbackServer(lock, nesting_, tmp_context_, context_,
+                              std::move(funcname), this, mf,
+                              std::forward<Args>(args)...);
   }
 
   void ProceedToAccept(bool ok) {

@@ -15,6 +15,7 @@
 #include <spdlog/spdlog.h>
 
 #include "../handler.h"
+#include "../util.h"
 
 namespace ggrpc {
 
@@ -37,21 +38,11 @@ class ClientReader {
   typedef std::function<void(ClientReaderError)> OnErrorFunc;
 
  private:
-  struct ConnectorThunk : Handler {
-    ClientReader* p;
-    ConnectorThunk(ClientReader* p) : p(p) {}
-    void Proceed(bool ok) override { p->ProceedToConnect(ok); }
-  };
-  ConnectorThunk connector_thunk_;
-  friend class ConnectorThunk;
+  detail::ConnectorThunk<ClientReader> connector_thunk_;
+  friend class detail::ConnectorThunk<ClientReader>;
 
-  struct ReaderThunk : Handler {
-    ClientReader* p;
-    ReaderThunk(ClientReader* p) : p(p) {}
-    void Proceed(bool ok) override { p->ProceedToRead(ok); }
-  };
-  ReaderThunk reader_thunk_;
-  friend class ReaderThunk;
+  detail::ReaderThunk<ClientReader> reader_thunk_;
+  friend class detail::ReaderThunk<ClientReader>;
 
   grpc::ClientContext context_;
   std::unique_ptr<grpc::ClientAsyncReader<R>> reader_;
@@ -208,24 +199,8 @@ class ClientReader {
   template <class F, class... Args>
   void RunCallback(std::unique_lock<std::mutex>& lock, std::string funcname,
                    F f, Args&&... args) {
-    // 普通にコールバックするとデッドロックの可能性があるので
-    // unlock してからコールバックする。
-    // 再度ロックした時に状態が変わってる可能性があるので注意すること。
-    if (f) {
-      ++nesting_;
-      lock.unlock();
-      try {
-        SPDLOG_TRACE("call {}", funcname);
-        f(std::forward<Args>(args)...);
-      } catch (std::exception& e) {
-        SPDLOG_ERROR("{} error: what={}", funcname, e.what());
-      } catch (...) {
-        SPDLOG_ERROR("{} error", funcname);
-      }
-      f = nullptr;
-      lock.lock();
-      --nesting_;
-    }
+    detail::RunCallbackClient(lock, nesting_, std::move(funcname), std::move(f),
+                              std::forward<Args>(args)...);
   }
 
   void ProceedToConnect(bool ok) {

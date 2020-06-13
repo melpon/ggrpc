@@ -16,6 +16,7 @@
 #include <spdlog/spdlog.h>
 
 #include "../handler.h"
+#include "../util.h"
 
 namespace ggrpc {
 
@@ -40,29 +41,14 @@ class ClientWriter {
   typedef std::function<void()> OnWritesDoneFunc;
 
  private:
-  struct ConnectorThunk : Handler {
-    ClientWriter* p;
-    ConnectorThunk(ClientWriter* p) : p(p) {}
-    void Proceed(bool ok) override { p->ProceedToConnect(ok); }
-  };
-  ConnectorThunk connector_thunk_;
-  friend class ConnectorThunk;
+  detail::ConnectorThunk<ClientWriter> connector_thunk_;
+  friend class detail::ConnectorThunk<ClientWriter>;
 
-  struct ReaderThunk : Handler {
-    ClientWriter* p;
-    ReaderThunk(ClientWriter* p) : p(p) {}
-    void Proceed(bool ok) override { p->ProceedToRead(ok); }
-  };
-  ReaderThunk reader_thunk_;
-  friend class ReaderThunk;
+  detail::ReaderThunk<ClientWriter> reader_thunk_;
+  friend class detail::ReaderThunk<ClientWriter>;
 
-  struct WriterThunk : Handler {
-    ClientWriter* p;
-    WriterThunk(ClientWriter* p) : p(p) {}
-    void Proceed(bool ok) override { p->ProceedToWrite(ok); }
-  };
-  WriterThunk writer_thunk_;
-  friend class WriterThunk;
+  detail::WriterThunk<ClientWriter> writer_thunk_;
+  friend class detail::WriterThunk<ClientWriter>;
 
   // ClientAsyncWriter よりも ClientContext
   // の方が寿命が長くなるようにしないといけないので、 必ず writer_ より上に
@@ -302,24 +288,8 @@ class ClientWriter {
   template <class F, class... Args>
   void RunCallback(std::unique_lock<std::mutex>& lock, std::string funcname,
                    F f, Args&&... args) {
-    // 普通にコールバックするとデッドロックの可能性があるので
-    // unlock してからコールバックする。
-    // 再度ロックした時に状態が変わってる可能性があるので注意すること。
-    if (f) {
-      ++nesting_;
-      lock.unlock();
-      try {
-        SPDLOG_TRACE("call {}", funcname);
-        f(std::forward<Args>(args)...);
-      } catch (std::exception& e) {
-        SPDLOG_ERROR("{} error: what={}", funcname, e.what());
-      } catch (...) {
-        SPDLOG_ERROR("{} error", funcname);
-      }
-      f = nullptr;
-      lock.lock();
-      --nesting_;
-    }
+    detail::RunCallbackClient(lock, nesting_, std::move(funcname), std::move(f),
+                              std::forward<Args>(args)...);
   }
 
   void ProceedToConnect(bool ok) {
