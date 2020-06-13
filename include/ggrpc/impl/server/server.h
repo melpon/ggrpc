@@ -18,6 +18,7 @@
 
 #include "../alarm.h"
 #include "../handler.h"
+#include "server_reader.h"
 #include "server_reader_writer.h"
 #include "server_response_writer.h"
 #include "server_writer.h"
@@ -111,6 +112,41 @@ class Server {
       Collect();
       holders_.push_back(
           std::unique_ptr<Holder>(new WriterHolder<W, R>(context)));
+    };
+
+    gen_handlers_.push_back(std::move(gh));
+  }
+
+  template <class H, class... Args>
+  void AddReaderHandler(Args... args) {
+    typedef typename H::WriteType W;
+    typedef typename H::ReadType R;
+
+    std::lock_guard<std::mutex> guard(mutex_);
+
+    // 既に Start 済み
+    if (threads_.size() != 0) {
+      return;
+    }
+    // 既に Shutdown 済み
+    if (shutdown_) {
+      return;
+    }
+
+    std::tuple<Args...> targs(std::move(args)...);
+
+    std::unique_ptr<GenHandler> gh(new GenHandler());
+    gh->gen_handler = [this, gh = gh.get(), targs = std::move(targs)](
+                          grpc::ServerCompletionQueue* cq) {
+      std::lock_guard<std::mutex> guard(mutex_);
+
+      H* handler = detail::new_from_tuple<H>(std::move(targs));
+      auto context = std::shared_ptr<ServerReaderContext<W, R>>(
+          new ServerReaderContext<W, R>(handler));
+      handler->Init(this, cq, gh->gen_handler, context);
+      Collect();
+      holders_.push_back(
+          std::unique_ptr<Holder>(new ReaderHolder<W, R>(context)));
     };
 
     gen_handlers_.push_back(std::move(gh));
@@ -287,6 +323,18 @@ class Server {
   struct WriterHolder : Holder {
     std::weak_ptr<ServerWriterContext<W, R>> wp;
     WriterHolder(std::shared_ptr<ServerWriterContext<W, R>> p) : wp(p) {}
+    void Close() override {
+      auto sp = wp.lock();
+      if (sp) {
+        sp->Close();
+      }
+    }
+    bool Expired() override { return wp.expired(); }
+  };
+  template <class W, class R>
+  struct ReaderHolder : Holder {
+    std::weak_ptr<ServerReaderContext<W, R>> wp;
+    ReaderHolder(std::shared_ptr<ServerReaderContext<W, R>> p) : wp(p) {}
     void Close() override {
       auto sp = wp.lock();
       if (sp) {

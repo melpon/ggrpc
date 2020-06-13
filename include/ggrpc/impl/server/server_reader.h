@@ -1,7 +1,6 @@
-#ifndef GGRPC_IMPL_SERVER_READER_WRITER_H_INCLUDED
-#define GGRPC_IMPL_SERVER_READER_WRITER_H_INCLUDED
+#ifndef GGRPC_IMPL_SERVER_READER_H_INCLUDED
+#define GGRPC_IMPL_SERVER_READER_H_INCLUDED
 
-#include <deque>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -21,77 +20,74 @@ namespace ggrpc {
 
 class Server;
 
-enum class ServerReaderWriterError {
+enum class ServerReaderError {
   WRITE,
 };
 
 template <class W, class R>
-class ServerReaderWriterHandler;
+class ServerReaderHandler;
 
 template <class W, class R>
-class ServerReaderWriterContext {
-  ServerReaderWriterHandler<W, R>* p_;
+class ServerReaderContext {
+  ServerReaderHandler<W, R>* p_;
 
-  ServerReaderWriterContext(ServerReaderWriterHandler<W, R>* p);
+  ServerReaderContext(ServerReaderHandler<W, R>* p);
   friend class Server;
 
  public:
-  ~ServerReaderWriterContext();
+  ~ServerReaderContext();
   Server* GetServer() const;
-  void Write(W resp, int64_t id = 0);
-  void Finish(grpc::Status status);
+  void Finish(W resp, grpc::Status status);
+  void FinishWithError(grpc::Status status);
   void Close();
 };
 
 template <class W, class R>
-class ServerReaderWriterHandler {
+class ServerReaderHandler {
   mutable std::mutex mutex_;
   Server* server_;
   grpc::ServerCompletionQueue* cq_;
 
   grpc::ServerContext server_context_;
-  grpc::ServerAsyncReaderWriter<W, R> streamer_;
+  grpc::ServerAsyncReader<W, R> reader_;
 
   std::function<void(grpc::ServerCompletionQueue*)> gen_handler_;
 
   R request_;
   struct ResponseData {
-    bool finish;
-    // finish == false
+    bool error;
     W response;
-    int64_t id;
-    // finish == true
     grpc::Status status;
   };
-  std::deque<ResponseData> response_queue_;
+  ResponseData response_;
 
   struct AcceptorThunk : Handler {
-    ServerReaderWriterHandler* p;
-    AcceptorThunk(ServerReaderWriterHandler* p) : p(p) {}
+    ServerReaderHandler* p;
+    AcceptorThunk(ServerReaderHandler* p) : p(p) {}
     void Proceed(bool ok) override { p->ProceedToAccept(ok); }
   };
   AcceptorThunk acceptor_thunk_;
   friend class AcceptorThunk;
 
   struct ReaderThunk : Handler {
-    ServerReaderWriterHandler* p;
-    ReaderThunk(ServerReaderWriterHandler* p) : p(p) {}
+    ServerReaderHandler* p;
+    ReaderThunk(ServerReaderHandler* p) : p(p) {}
     void Proceed(bool ok) override { p->ProceedToRead(ok); }
   };
   ReaderThunk reader_thunk_;
   friend class ReaderThunk;
 
   struct WriterThunk : Handler {
-    ServerReaderWriterHandler* p;
-    WriterThunk(ServerReaderWriterHandler* p) : p(p) {}
+    ServerReaderHandler* p;
+    WriterThunk(ServerReaderHandler* p) : p(p) {}
     void Proceed(bool ok) override { p->ProceedToWrite(ok); }
   };
   WriterThunk writer_thunk_;
   friend class WriterThunk;
 
   struct NotifierThunk : Handler {
-    ServerReaderWriterHandler* p;
-    NotifierThunk(ServerReaderWriterHandler* p) : p(p) {}
+    ServerReaderHandler* p;
+    NotifierThunk(ServerReaderHandler* p) : p(p) {}
     void Proceed(bool ok) override { p->ProceedToNotify(ok); }
   };
   NotifierThunk notifier_thunk_;
@@ -99,14 +95,7 @@ class ServerReaderWriterHandler {
 
   // 状態マシン
   enum class ReadStatus { LISTENING, READING, CANCELING, FINISHED };
-  enum class WriteStatus {
-    LISTENING,
-    WRITING,
-    IDLE,
-    FINISHING,
-    CANCELING,
-    FINISHED
-  };
+  enum class WriteStatus { LISTENING, IDLE, FINISHING, CANCELING, FINISHED };
   ReadStatus read_status_ = ReadStatus::LISTENING;
   WriteStatus write_status_ = WriteStatus::LISTENING;
 
@@ -116,20 +105,20 @@ class ServerReaderWriterHandler {
   grpc::Alarm alarm_;
   void Notify() { alarm_.Set(cq_, gpr_time_0(GPR_TIMESPAN), &notifier_thunk_); }
 
-  std::shared_ptr<ServerReaderWriterContext<W, R>> context_;
-  std::shared_ptr<ServerReaderWriterContext<W, R>> tmp_context_;
+  std::shared_ptr<ServerReaderContext<W, R>> context_;
+  std::shared_ptr<ServerReaderContext<W, R>> tmp_context_;
 
   struct SafeDeleter {
-    ServerReaderWriterHandler<W, R>* p;
+    ServerReaderHandler<W, R>* p;
     std::unique_lock<std::mutex> lock;
-    SafeDeleter(ServerReaderWriterHandler<W, R>* p) : p(p), lock(p->mutex_) {}
+    SafeDeleter(ServerReaderHandler<W, R>* p) : p(p), lock(p->mutex_) {}
     ~SafeDeleter() {
-      bool del = p->release_ &&
-                 p->read_status_ ==
-                     ServerReaderWriterHandler<W, R>::ReadStatus::FINISHED &&
-                 p->write_status_ ==
-                     ServerReaderWriterHandler<W, R>::WriteStatus::FINISHED &&
-                 p->nesting_ == 0;
+      bool del =
+          p->release_ &&
+          p->read_status_ == ServerReaderHandler<W, R>::ReadStatus::FINISHED &&
+          p->write_status_ ==
+              ServerReaderHandler<W, R>::WriteStatus::FINISHED &&
+          p->nesting_ == 0;
       lock.unlock();
       if (del) {
         delete p;
@@ -138,14 +127,14 @@ class ServerReaderWriterHandler {
   };
 
  public:
-  ServerReaderWriterHandler()
-      : streamer_(&server_context_),
+  ServerReaderHandler()
+      : reader_(&server_context_),
         acceptor_thunk_(this),
         reader_thunk_(this),
         writer_thunk_(this),
         notifier_thunk_(this) {}
-  virtual ~ServerReaderWriterHandler() {
-    SPDLOG_TRACE("[0x{}] deleted ServerReaderWriterHandler", (void*)this);
+  virtual ~ServerReaderHandler() {
+    SPDLOG_TRACE("[0x{}] deleted ServerReaderHandler", (void*)this);
   }
 
  private:
@@ -154,12 +143,12 @@ class ServerReaderWriterHandler {
   // 誰かが参照してれば引き続き読み書きできる
   void Init(Server* server, grpc::ServerCompletionQueue* cq,
             std::function<void(grpc::ServerCompletionQueue*)> gen_handler,
-            std::shared_ptr<ServerReaderWriterContext<W, R>> context) {
+            std::shared_ptr<ServerReaderContext<W, R>> context) {
     server_ = server;
     cq_ = cq;
     gen_handler_ = std::move(gen_handler);
     context_ = context;
-    Request(&server_context_, &streamer_, cq_, &acceptor_thunk_);
+    Request(&server_context_, &reader_, cq_, &acceptor_thunk_);
   }
   typedef W WriteType;
   typedef R ReadType;
@@ -172,7 +161,7 @@ class ServerReaderWriterHandler {
 
     DoClose(d.lock);
   }
-  friend class ServerReaderWriterContext<W, R>;
+  friend class ServerReaderContext<W, R>;
 
   void Close() {
     SafeDeleter d(this);
@@ -184,7 +173,7 @@ class ServerReaderWriterHandler {
   // Close を呼ぶと context_ が nullptr になってしまうが、
   // コールバック中に Context() が無効になると使いにくいので、
   // コールバック中は tmp_context_ を設定しておいて、それが利用可能な場合はそちらを使う
-  std::shared_ptr<ServerReaderWriterContext<W, R>> Context() const {
+  std::shared_ptr<ServerReaderContext<W, R>> Context() const {
     std::unique_lock<std::mutex> lock(mutex_);
     return tmp_context_ ? tmp_context_ : context_;
   }
@@ -195,12 +184,10 @@ class ServerReaderWriterHandler {
 
     // 読み書き中ならキャンセルする
     if (read_status_ == ReadStatus::READING ||
-        write_status_ == WriteStatus::WRITING ||
         write_status_ == WriteStatus::FINISHING) {
       server_context_.TryCancel();
       // 書き込み中ならアラームもキャンセルする
-      if (write_status_ == WriteStatus::WRITING ||
-          write_status_ == WriteStatus::FINISHING) {
+      if (write_status_ == WriteStatus::FINISHING) {
         alarm_.Cancel();
       }
     }
@@ -212,8 +199,8 @@ class ServerReaderWriterHandler {
     } else {
       read_status_ = ReadStatus::FINISHED;
     }
-    if (write_status_ == WriteStatus::WRITING ||
-        write_status_ == WriteStatus::FINISHING ||
+
+    if (write_status_ == WriteStatus::FINISHING ||
         write_status_ == WriteStatus::CANCELING ||
         write_status_ == WriteStatus::LISTENING) {
       write_status_ = WriteStatus::CANCELING;
@@ -243,49 +230,29 @@ class ServerReaderWriterHandler {
  private:
   Server* GetServer() const { return server_; }
 
-  void Write(W resp, int64_t id) {
+  void Finish(W resp, grpc::Status status) {
     std::lock_guard<std::mutex> guard(mutex_);
-
-    SPDLOG_TRACE("[0x{}] Write: {}", (void*)this, resp.DebugString());
+    SPDLOG_TRACE("[0x{}] Finish: {}", (void*)this, resp.DebugString());
 
     if (write_status_ == WriteStatus::IDLE) {
-      ResponseData d;
-      d.finish = false;
-      d.response = std::move(resp);
-      d.id = id;
+      response_.error = false;
+      response_.response = std::move(resp);
+      response_.status = status;
 
-      write_status_ = WriteStatus::WRITING;
-      response_queue_.push_back(std::move(d));
+      write_status_ = WriteStatus::FINISHING;
       Notify();
-    } else if (write_status_ == WriteStatus::WRITING) {
-      ResponseData d;
-      d.finish = false;
-      d.response = std::move(resp);
-      d.id = id;
-
-      response_queue_.push_back(std::move(d));
     }
   }
 
-  void Finish(grpc::Status status) {
+  void FinishWithError(grpc::Status status) {
     std::lock_guard<std::mutex> guard(mutex_);
 
-    SPDLOG_TRACE("[0x{}] Finish", (void*)this);
-
     if (write_status_ == WriteStatus::IDLE) {
-      ResponseData d;
-      d.finish = true;
-      d.status = std::move(status);
+      response_.error = true;
+      response_.status = status;
 
       write_status_ = WriteStatus::FINISHING;
-      response_queue_.push_back(std::move(d));
       Notify();
-    } else if (write_status_ == WriteStatus::WRITING) {
-      ResponseData d;
-      d.finish = true;
-      d.status = std::move(status);
-
-      response_queue_.push_back(std::move(d));
     }
   }
 
@@ -354,11 +321,11 @@ class ServerReaderWriterHandler {
     d.lock.lock();
 
     read_status_ = ReadStatus::READING;
+    reader_.Read(&request_, &reader_thunk_);
+
     write_status_ = WriteStatus::IDLE;
 
-    streamer_.Read(&request_, &reader_thunk_);
-
-    RunCallback(d.lock, "OnAccept", &ServerReaderWriterHandler::OnAccept);
+    RunCallback(d.lock, "OnAccept", &ServerReaderHandler::OnAccept);
   }
 
   void ProceedToRead(bool ok) {
@@ -376,21 +343,30 @@ class ServerReaderWriterHandler {
       return;
     }
 
+    // 書き込み状態が FINISHING 以降だった場合は、
+    // 読み込みに関するコールバックは呼ばずに終了する
+    if (write_status_ == WriteStatus::FINISHING ||
+        write_status_ == WriteStatus::FINISHED) {
+      read_status_ = ReadStatus::FINISHED;
+      Done(d.lock);
+      return;
+    }
+
     if (!ok) {
       // 読み込みがすべて完了した（あるいは失敗した）
       // あとは書き込み処理が終わるのを待つだけ
       read_status_ = ReadStatus::FINISHED;
       RunCallback(d.lock, "OnReadDoneOrError",
-                  &ServerReaderWriterHandler::OnReadDoneOrError);
+                  &ServerReaderHandler::OnReadDoneOrError);
       Done(d.lock);
       return;
     }
 
-    RunCallback(d.lock, "OnRead", &ServerReaderWriterHandler::OnRead,
-                std::move(request_));
-
     // 次の読み込み
-    streamer_.Read(&request_, &reader_thunk_);
+    reader_.Read(&request_, &reader_thunk_);
+
+    RunCallback(d.lock, "OnRead", &ServerReaderHandler::OnRead,
+                std::move(request_));
   }
 
   void ProceedToWrite(bool ok) {
@@ -398,10 +374,8 @@ class ServerReaderWriterHandler {
 
     SPDLOG_TRACE("[0x{}] ProceedToWrite: ok={}", (void*)this, ok);
 
-    assert(write_status_ == WriteStatus::WRITING ||
-           write_status_ == WriteStatus::FINISHING ||
+    assert(write_status_ == WriteStatus::FINISHING ||
            write_status_ == WriteStatus::CANCELING);
-    assert(!response_queue_.empty());
 
     if (write_status_ == WriteStatus::CANCELING) {
       // 終了
@@ -413,43 +387,21 @@ class ServerReaderWriterHandler {
     if (!ok) {
       SPDLOG_ERROR("write failed");
       write_status_ = WriteStatus::FINISHED;
-      RunCallback(d.lock, "OnError", &ServerReaderWriterHandler::OnError,
-                  ServerReaderWriterError::WRITE);
+      RunCallback(d.lock, "OnError", &ServerReaderHandler::OnError,
+                  ServerReaderError::WRITE);
       Done(d.lock);
       return;
     }
 
-    auto resp = std::move(response_queue_.front());
-    response_queue_.pop_front();
-
-    if (write_status_ == WriteStatus::WRITING) {
-      if (response_queue_.empty()) {
-        write_status_ = WriteStatus::IDLE;
-      } else {
-        auto& next = response_queue_.front();
-        if (!next.finish) {
-          // Response
-          streamer_.Write(next.response, &writer_thunk_);
-        } else {
-          // Finish
-          streamer_.Finish(next.status, &writer_thunk_);
-          write_status_ = WriteStatus::FINISHING;
-        }
-      }
-      RunCallback(d.lock, "OnWrite", &ServerReaderWriterHandler::OnWrite,
-                  std::move(resp.response), resp.id);
-    } else if (write_status_ == WriteStatus::FINISHING) {
-      assert(resp.finish);
-      write_status_ = WriteStatus::FINISHED;
-      if (read_status_ == ReadStatus::READING) {
-        // まだ読込中ならキャンセルする
-        read_status_ = ReadStatus::CANCELING;
-        server_context_.TryCancel();
-      }
-      RunCallback(d.lock, "OnFinish", &ServerReaderWriterHandler::OnFinish,
-                  resp.status);
-      Done(d.lock);
+    write_status_ = WriteStatus::FINISHED;
+    if (read_status_ == ReadStatus::READING) {
+      // まだ読込中ならキャンセルする
+      read_status_ = ReadStatus::CANCELING;
+      server_context_.TryCancel();
     }
+    RunCallback(d.lock, "OnFinish", &ServerReaderHandler::OnFinish,
+                std::move(response_.response), response_.status);
+    Done(d.lock);
   }
 
   void ProceedToNotify(bool ok) {
@@ -457,10 +409,8 @@ class ServerReaderWriterHandler {
 
     SPDLOG_TRACE("[0x{}] ProceedToNotify: ok={}", (void*)this, ok);
 
-    assert(write_status_ == WriteStatus::WRITING ||
-           write_status_ == WriteStatus::FINISHING ||
+    assert(write_status_ == WriteStatus::FINISHING ||
            write_status_ == WriteStatus::CANCELING);
-    assert(!response_queue_.empty());
 
     if (write_status_ == WriteStatus::CANCELING) {
       // 終了
@@ -472,56 +422,52 @@ class ServerReaderWriterHandler {
     if (!ok) {
       SPDLOG_ERROR("alarm cancelled");
       write_status_ = WriteStatus::FINISHED;
-      RunCallback(d.lock, "OnError", &ServerReaderWriterHandler::OnError,
-                  ServerReaderWriterError::WRITE);
+      RunCallback(d.lock, "OnError", &ServerReaderHandler::OnError,
+                  ServerReaderError::WRITE);
       Done(d.lock);
       return;
     }
 
-    auto& data = response_queue_.front();
-    if (!data.finish) {
-      // Response
-      streamer_.Write(std::move(data.response), &writer_thunk_);
+    if (!response_.error) {
+      reader_.Finish(response_.response, response_.status, &writer_thunk_);
     } else {
-      // Finish
-      streamer_.Finish(data.status, &writer_thunk_);
+      reader_.FinishWithError(response_.status, &writer_thunk_);
     }
   }
 
  public:
   virtual void Request(grpc::ServerContext* context,
-                       grpc::ServerAsyncReaderWriter<W, R>* streamer,
+                       grpc::ServerAsyncReader<W, R>* streamer,
                        grpc::ServerCompletionQueue* cq, void* tag) = 0;
   virtual void OnAccept() {}
   virtual void OnRead(R req) {}
   virtual void OnReadDoneOrError() {}
-  virtual void OnWrite(W response, int64_t id) {}
-  virtual void OnFinish(grpc::Status status) {}
-  virtual void OnError(ServerReaderWriterError error) {}
+  virtual void OnFinish(W response, grpc::Status status) {}
+  virtual void OnError(ServerReaderError error) {}
 };
 
 template <class W, class R>
-ServerReaderWriterContext<W, R>::ServerReaderWriterContext(
-    ServerReaderWriterHandler<W, R>* p)
+ServerReaderContext<W, R>::ServerReaderContext(
+    ServerReaderHandler<W, R>* p)
     : p_(p) {}
 template <class W, class R>
-ServerReaderWriterContext<W, R>::~ServerReaderWriterContext() {
+ServerReaderContext<W, R>::~ServerReaderContext() {
   p_->Release();
 }
 template <class W, class R>
-Server* ServerReaderWriterContext<W, R>::GetServer() const {
+Server* ServerReaderContext<W, R>::GetServer() const {
   return p_->GetServer();
 }
 template <class W, class R>
-void ServerReaderWriterContext<W, R>::Write(W resp, int64_t id) {
-  p_->Write(std::move(resp), id);
+void ServerReaderContext<W, R>::Finish(W resp, grpc::Status status) {
+  p_->Finish(std::move(resp), status);
 }
 template <class W, class R>
-void ServerReaderWriterContext<W, R>::Finish(grpc::Status status) {
-  p_->Finish(status);
+void ServerReaderContext<W, R>::FinishWithError(grpc::Status status) {
+  p_->FinishWithError(status);
 }
 template <class W, class R>
-void ServerReaderWriterContext<W, R>::Close() {
+void ServerReaderContext<W, R>::Close() {
   p_->Close();
 }
 

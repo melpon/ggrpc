@@ -12,6 +12,7 @@ service Test {
   rpc Unary(UnaryRequest) returns (UnaryResponse) {}
   rpc Bidi(stream BidiRequest) returns (stream BidiResponse) {}
   rpc Sstream(SstreamRequest) returns (stream SstreamResponse) {}
+  rpc Cstream(stream CstreamRequest) returns (CstreamResponse) {}
 }
 
 message UnaryRequest {
@@ -35,5 +36,13 @@ message SstreamRequest {
 }
 
 message SstreamResponse {
+  int32 value = 1;
+}
+
+message CstreamRequest {
+  int32 value = 1;
+}
+
+message CstreamResponse {
   int32 value = 1;
 }

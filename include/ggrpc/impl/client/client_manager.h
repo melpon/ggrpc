@@ -20,6 +20,7 @@
 #include "client_reader.h"
 #include "client_reader_writer.h"
 #include "client_response_reader.h"
+#include "client_writer.h"
 
 namespace ggrpc {
 
@@ -59,6 +60,18 @@ class ClientManager {
   struct ReaderHolder : Holder {
     std::weak_ptr<ClientReader<W, R>> wp;
     ReaderHolder(std::shared_ptr<ClientReader<W, R>> p) : wp(p) {}
+    void Close() override {
+      auto sp = wp.lock();
+      if (sp) {
+        sp->Close();
+      }
+    }
+    bool Expired() override { return wp.expired(); }
+  };
+  template <class W, class R>
+  struct WriterHolder : Holder {
+    std::weak_ptr<ClientWriter<W, R>> wp;
+    WriterHolder(std::shared_ptr<ClientWriter<W, R>> p) : wp(p) {}
     void Close() override {
       auto sp = wp.lock();
       if (sp) {
@@ -189,6 +202,23 @@ class ClientManager {
         new ClientReader<W, R>(cq, std::move(connect)),
         [](ClientReader<W, R>* p) { p->Release(); });
     holders_.push_back(std::unique_ptr<Holder>(new ReaderHolder<W, R>(p)));
+    return p;
+  }
+
+  template <class W, class R>
+  std::shared_ptr<ClientWriter<W, R>> CreateWriter(
+      typename ClientWriter<W, R>::ConnectFunc connect) {
+    std::lock_guard<std::mutex> guard(mutex_);
+
+    Collect();
+
+    auto client_id = next_client_id_++;
+    auto cq = &threads_[client_id % threads_.size()].cq;
+
+    std::shared_ptr<ClientWriter<W, R>> p(
+        new ClientWriter<W, R>(cq, std::move(connect)),
+        [](ClientWriter<W, R>* p) { p->Release(); });
+    holders_.push_back(std::unique_ptr<Holder>(new WriterHolder<W, R>(p)));
     return p;
   }
 

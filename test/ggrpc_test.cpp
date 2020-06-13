@@ -65,6 +65,39 @@ class TestSstreamHandler
   void OnError(ggrpc::ServerWriterError error) override {}
 };
 
+class TestCstreamHandler
+    : public ggrpc::ServerReaderHandler<gg::CstreamResponse,
+                                        gg::CstreamRequest> {
+  gg::Test::AsyncService* service_;
+  int sum_ = 0;
+
+ public:
+  TestCstreamHandler(gg::Test::AsyncService* service) : service_(service) {}
+  void Request(
+      grpc::ServerContext* context,
+      grpc::ServerAsyncReader<gg::CstreamResponse, gg::CstreamRequest>* reader,
+      grpc::ServerCompletionQueue* cq, void* tag) override {
+    service_->RequestCstream(context, reader, cq, cq, tag);
+  }
+  void OnAccept() override { gg::CstreamResponse resp; }
+  void OnRead(gg::CstreamRequest req) override {
+    SPDLOG_TRACE("received CstreamRequest {}", req.DebugString());
+    if (req.value() == 100) {
+      gg::CstreamResponse resp;
+      resp.set_value(sum_);
+      Context()->Finish(resp, grpc::Status::OK);
+    } else {
+      sum_ += req.value();
+    }
+  }
+  void OnReadDoneOrError() override {
+    gg::CstreamResponse resp;
+    resp.set_value(sum_);
+    Context()->Finish(resp, grpc::Status::OK);
+  }
+  void OnError(ggrpc::ServerReaderError error) override {}
+};
+
 class TestBidiHandler
     : public ggrpc::ServerReaderWriterHandler<gg::BidiResponse,
                                               gg::BidiRequest> {
@@ -115,6 +148,7 @@ class TestServer {
     // ハンドラの登録
     server_.AddResponseWriterHandler<TestUnaryHandler>(&service_);
     server_.AddWriterHandler<TestSstreamHandler>(&service_);
+    server_.AddReaderHandler<TestCstreamHandler>(&service_);
     server_.AddReaderWriterHandler<TestBidiHandler>(&service_);
 
     server_.Start(builder, threads);
@@ -125,6 +159,8 @@ typedef ggrpc::ClientResponseReader<gg::UnaryRequest, gg::UnaryResponse>
     UnaryClient;
 typedef ggrpc::ClientReader<gg::SstreamRequest, gg::SstreamResponse>
     SstreamClient;
+typedef ggrpc::ClientWriter<gg::CstreamRequest, gg::CstreamResponse>
+    CstreamClient;
 typedef ggrpc::ClientReaderWriter<gg::BidiRequest, gg::BidiResponse> BidiClient;
 
 class TestClientManager {
@@ -156,6 +192,15 @@ class TestClientManager {
         });
   }
 
+  std::shared_ptr<CstreamClient> CreateCstream() {
+    return cm_.CreateWriter<gg::CstreamRequest, gg::CstreamResponse>(
+        [stub = stub_.get()](grpc::ClientContext* context,
+                             gg::CstreamResponse* response,
+                             grpc::CompletionQueue* cq, void* tag) {
+          return stub->AsyncCstream(context, response, cq, tag);
+        });
+  }
+
   std::shared_ptr<BidiClient> CreateBidi() {
     return cm_.CreateReaderWriter<gg::BidiRequest, gg::BidiResponse>(
         [stub = stub_.get()](grpc::ClientContext* context,
@@ -169,7 +214,7 @@ class TestClientManager {
 void test_client_bidi_connect_callback() {
   TestServer server;
   server.Start("0.0.0.0:50051", 10);
-  std::this_thread::sleep_for(std::chrono::seconds(1));
+  std::this_thread::sleep_for(std::chrono::seconds(2));
 
   auto channel = grpc::CreateChannel("localhost:50051",
                                      grpc::InsecureChannelCredentials());
@@ -248,7 +293,7 @@ void test_client_bidi_connect_callback() {
 void test_client_unary() {
   TestServer server;
   server.Start("0.0.0.0:50051", 10);
-  std::this_thread::sleep_for(std::chrono::seconds(1));
+  std::this_thread::sleep_for(std::chrono::seconds(2));
 
   auto channel = grpc::CreateChannel("localhost:50051",
                                      grpc::InsecureChannelCredentials());
@@ -280,7 +325,7 @@ void test_client_unary() {
 void test_client_sstream() {
   TestServer server;
   server.Start("0.0.0.0:50051", 10);
-  std::this_thread::sleep_for(std::chrono::seconds(1));
+  std::this_thread::sleep_for(std::chrono::seconds(2));
 
   auto channel = grpc::CreateChannel("localhost:50051",
                                      grpc::InsecureChannelCredentials());
@@ -292,7 +337,7 @@ void test_client_sstream() {
   {
     auto ss = cm.CreateSstream();
     req.set_value(100);
-    int n = 0;
+    std::atomic<int> n = 0;
     ss->SetOnRead([&n](gg::SstreamResponse resp) { n += resp.value(); });
     ss->Connect(req);
     std::this_thread::sleep_for(std::chrono::seconds(2));
@@ -305,6 +350,60 @@ void test_client_sstream() {
     ss->SetOnRead([ss](gg::SstreamResponse resp) { ss->Close(); });
     ss->Connect(req);
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
+  }
+}
+
+void test_client_cstream() {
+  TestServer server;
+  server.Start("0.0.0.0:50051", 10);
+  std::this_thread::sleep_for(std::chrono::seconds(2));
+
+  auto channel = grpc::CreateChannel("localhost:50051",
+                                     grpc::InsecureChannelCredentials());
+  TestClientManager cm(channel, 10);
+  cm.Start();
+
+  gg::CstreamRequest req;
+
+  {
+    auto cs = cm.CreateCstream();
+    std::atomic<int> n = 0;
+    cs->SetOnResponse(
+        [&n](gg::CstreamResponse resp, grpc::Status) { n = resp.value(); });
+
+    cs->Connect();
+    req.set_value(1);
+    cs->Write(req);
+    req.set_value(2);
+    cs->Write(req);
+    req.set_value(4);
+    cs->Write(req);
+    cs->WritesDone();
+
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    ASSERT(n == 7);
+  }
+
+  {
+    auto cs = cm.CreateCstream();
+    std::atomic<int> n = 0;
+    cs->SetOnResponse(
+        [&n](gg::CstreamResponse resp, grpc::Status) { n = resp.value(); });
+
+    cs->Connect();
+    req.set_value(1);
+    cs->Write(req);
+    req.set_value(100);
+    cs->Write(req);
+    req.set_value(4);
+    cs->Write(req);
+    cs->Write(req);
+    cs->Write(req);
+    cs->Write(req);
+    //cs->WritesDone();
+
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    ASSERT(n == 1);
   }
 }
 
@@ -408,7 +507,7 @@ void test_client_alarm() {
 void test_server_alarm() {
   TestServer server;
   server.Start("0.0.0.0:50051", 10);
-  std::this_thread::sleep_for(std::chrono::seconds(1));
+  std::this_thread::sleep_for(std::chrono::seconds(2));
 
   auto alarm = server.Server()->CreateAlarm();
   _test_alarm(alarm);
@@ -434,6 +533,7 @@ int main() {
   test_client_bidi_connect_callback();
   test_client_unary();
   test_client_sstream();
+  test_client_cstream();
   test_server();
   test_client_alarm();
   test_server_alarm();

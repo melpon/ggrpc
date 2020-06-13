@@ -60,7 +60,6 @@ class ServerResponseWriterHandler {
     // finish == false
     W response;
     grpc::Status status;
-    int64_t id;
   };
   ResponseData response_;
 
