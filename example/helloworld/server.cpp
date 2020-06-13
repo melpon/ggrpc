@@ -1,4 +1,4 @@
-#include <ggrpc/server.h>
+#include <ggrpc/ggrpc.h>
 
 #include "helloworld.grpc.pb.h"
 

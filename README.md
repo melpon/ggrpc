@@ -30,7 +30,7 @@ message HelloResponse {
 #include <chrono>
 
 // ggrpc
-#include <ggrpc/client.h>
+#include <ggrpc/ggrpc.h>
 
 #include "helloworld.grpc.pb.h"
 
@@ -83,7 +83,7 @@ int main() {
 サーバ側:
 
 ```cpp
-#include <ggrpc/server.h>
+#include <ggrpc/ggrpc.h>
 
 #include "helloworld.grpc.pb.h"
 
