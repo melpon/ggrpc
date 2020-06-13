@@ -424,16 +424,16 @@ class ServerReaderWriterHandler {
 
 class Server {
  public:
-  template <class H, class... Args>
+  template <class T, class... Args>
   void AddResponseWriterHandler(Args... args);
 
-  template <class H, class... Args>
+  template <class T, class... Args>
   void AddWriterHandler(Args... args);
 
-  template <class H, class... Args>
+  template <class T, class... Args>
   void AddReaderHandler(Args... args);
 
-  template <class H, class... Args>
+  template <class T, class... Args>
   void AddReaderWriterHandler(Args... args);
 
   void Start(grpc::ServerBuilder& builder, int threads);

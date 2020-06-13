@@ -47,144 +47,36 @@ class Server {
   Server() {}
   ~Server() { Shutdown(); }
 
-  template <class H, class... Args>
+  template <class T, class... Args>
   void AddResponseWriterHandler(Args... args) {
-    typedef typename H::WriteType W;
-    typedef typename H::ReadType R;
-
-    std::lock_guard<std::mutex> guard(mutex_);
-
-    // 既に Start 済み
-    if (threads_.size() != 0) {
-      return;
-    }
-    // 既に Shutdown 済み
-    if (shutdown_) {
-      return;
-    }
-
-    std::tuple<Args...> targs(std::move(args)...);
-
-    std::unique_ptr<GenHandler> gh(new GenHandler());
-    gh->gen_handler = [this, gh = gh.get(), targs = std::move(targs)](
-                          grpc::ServerCompletionQueue* cq) {
-      std::lock_guard<std::mutex> guard(mutex_);
-
-      H* handler = detail::new_from_tuple<H>(std::move(targs));
-      auto context = std::shared_ptr<ServerResponseWriterContext<W, R>>(
-          new ServerResponseWriterContext<W, R>(handler));
-      handler->Init(this, cq, gh->gen_handler, context);
-      Collect();
-      holders_.push_back(
-          std::unique_ptr<Holder>(new ResponseWriterHolder<W, R>(context)));
-    };
-
-    gen_handlers_.push_back(std::move(gh));
+    typedef typename T::WriteType W;
+    typedef typename T::ReadType R;
+    AddHandler<T, ServerResponseWriterContext<W, R>,
+               ResponseWriterHolder<W, R>>(std::move(args)...);
   }
 
-  template <class H, class... Args>
+  template <class T, class... Args>
   void AddWriterHandler(Args... args) {
-    typedef typename H::WriteType W;
-    typedef typename H::ReadType R;
-
-    std::lock_guard<std::mutex> guard(mutex_);
-
-    // 既に Start 済み
-    if (threads_.size() != 0) {
-      return;
-    }
-    // 既に Shutdown 済み
-    if (shutdown_) {
-      return;
-    }
-
-    std::tuple<Args...> targs(std::move(args)...);
-
-    std::unique_ptr<GenHandler> gh(new GenHandler());
-    gh->gen_handler = [this, gh = gh.get(), targs = std::move(targs)](
-                          grpc::ServerCompletionQueue* cq) {
-      std::lock_guard<std::mutex> guard(mutex_);
-
-      H* handler = detail::new_from_tuple<H>(std::move(targs));
-      auto context = std::shared_ptr<ServerWriterContext<W, R>>(
-          new ServerWriterContext<W, R>(handler));
-      handler->Init(this, cq, gh->gen_handler, context);
-      Collect();
-      holders_.push_back(
-          std::unique_ptr<Holder>(new WriterHolder<W, R>(context)));
-    };
-
-    gen_handlers_.push_back(std::move(gh));
+    typedef typename T::WriteType W;
+    typedef typename T::ReadType R;
+    AddHandler<T, ServerWriterContext<W, R>, WriterHolder<W, R>>(
+        std::move(args)...);
   }
 
-  template <class H, class... Args>
+  template <class T, class... Args>
   void AddReaderHandler(Args... args) {
-    typedef typename H::WriteType W;
-    typedef typename H::ReadType R;
-
-    std::lock_guard<std::mutex> guard(mutex_);
-
-    // 既に Start 済み
-    if (threads_.size() != 0) {
-      return;
-    }
-    // 既に Shutdown 済み
-    if (shutdown_) {
-      return;
-    }
-
-    std::tuple<Args...> targs(std::move(args)...);
-
-    std::unique_ptr<GenHandler> gh(new GenHandler());
-    gh->gen_handler = [this, gh = gh.get(), targs = std::move(targs)](
-                          grpc::ServerCompletionQueue* cq) {
-      std::lock_guard<std::mutex> guard(mutex_);
-
-      H* handler = detail::new_from_tuple<H>(std::move(targs));
-      auto context = std::shared_ptr<ServerReaderContext<W, R>>(
-          new ServerReaderContext<W, R>(handler));
-      handler->Init(this, cq, gh->gen_handler, context);
-      Collect();
-      holders_.push_back(
-          std::unique_ptr<Holder>(new ReaderHolder<W, R>(context)));
-    };
-
-    gen_handlers_.push_back(std::move(gh));
+    typedef typename T::WriteType W;
+    typedef typename T::ReadType R;
+    AddHandler<T, ServerReaderContext<W, R>, ReaderHolder<W, R>>(
+        std::move(args)...);
   }
 
-  template <class H, class... Args>
+  template <class T, class... Args>
   void AddReaderWriterHandler(Args... args) {
-    typedef typename H::WriteType W;
-    typedef typename H::ReadType R;
-
-    std::lock_guard<std::mutex> guard(mutex_);
-
-    // 既に Start 済み
-    if (threads_.size() != 0) {
-      return;
-    }
-    // 既に Shutdown 済み
-    if (shutdown_) {
-      return;
-    }
-
-    std::tuple<Args...> targs(std::move(args)...);
-
-    std::unique_ptr<GenHandler> gh(new GenHandler());
-    gh->gen_handler = [this, gh = gh.get(), targs = std::move(targs)](
-                          grpc::ServerCompletionQueue* cq) {
-      std::lock_guard<std::mutex> guard(mutex_);
-
-      H* handler = detail::new_from_tuple<H>(std::move(targs));
-      auto context = std::shared_ptr<ServerReaderWriterContext<W, R>>(
-          new ServerReaderWriterContext<W, R>(handler));
-      handler->Init(this, cq, gh->gen_handler, context);
-      Collect();
-      holders_.push_back(
-          std::unique_ptr<Holder>(new ReaderWriterHolder<W, R>(context)));
-    };
-
-    gen_handlers_.push_back(std::move(gh));
+    typedef typename T::WriteType W;
+    typedef typename T::ReadType R;
+    AddHandler<T, ServerReaderWriterContext<W, R>, ReaderWriterHolder<W, R>>(
+        std::move(args)...);
   }
 
   void Start(grpc::ServerBuilder& builder, int threads) {
@@ -278,6 +170,39 @@ class Server {
   }
 
  private:
+  template <class T, class C, class H, class... Args>
+  void AddHandler(Args... args) {
+    typedef typename T::WriteType W;
+    typedef typename T::ReadType R;
+
+    std::lock_guard<std::mutex> guard(mutex_);
+
+    // 既に Start 済み
+    if (threads_.size() != 0) {
+      return;
+    }
+    // 既に Shutdown 済み
+    if (shutdown_) {
+      return;
+    }
+
+    std::tuple<Args...> targs(std::move(args)...);
+
+    std::unique_ptr<GenHandler> gh(new GenHandler());
+    gh->gen_handler = [this, gh = gh.get(), targs = std::move(targs)](
+                          grpc::ServerCompletionQueue* cq) {
+      std::lock_guard<std::mutex> guard(mutex_);
+
+      T* handler = detail::new_from_tuple<T>(std::move(targs));
+      auto context = std::shared_ptr<C>(new C(handler));
+      handler->Init(this, cq, gh->gen_handler, context);
+      Collect();
+      holders_.push_back(std::unique_ptr<Holder>(new H(context)));
+    };
+
+    gen_handlers_.push_back(std::move(gh));
+  }
+
   void HandleRpcs(grpc::ServerCompletionQueue* cq) {
     for (auto& gh : gen_handlers_) {
       gh->gen_handler(cq);
@@ -305,42 +230,36 @@ class Server {
     virtual ~Holder() {}
     virtual void Close() = 0;
     virtual bool Expired() = 0;
+
+   protected:
+    template <class T>
+    static void CloseWP(std::weak_ptr<T> wp) {
+      auto sp = wp.lock();
+      if (sp) {
+        sp->Close();
+      }
+    }
   };
   template <class W, class R>
   struct ResponseWriterHolder : Holder {
     std::weak_ptr<ServerResponseWriterContext<W, R>> wp;
     ResponseWriterHolder(std::shared_ptr<ServerResponseWriterContext<W, R>> p)
         : wp(p) {}
-    void Close() override {
-      auto sp = wp.lock();
-      if (sp) {
-        sp->Close();
-      }
-    }
+    void Close() override { CloseWP(wp); }
     bool Expired() override { return wp.expired(); }
   };
   template <class W, class R>
   struct WriterHolder : Holder {
     std::weak_ptr<ServerWriterContext<W, R>> wp;
     WriterHolder(std::shared_ptr<ServerWriterContext<W, R>> p) : wp(p) {}
-    void Close() override {
-      auto sp = wp.lock();
-      if (sp) {
-        sp->Close();
-      }
-    }
+    void Close() override { CloseWP(wp); }
     bool Expired() override { return wp.expired(); }
   };
   template <class W, class R>
   struct ReaderHolder : Holder {
     std::weak_ptr<ServerReaderContext<W, R>> wp;
     ReaderHolder(std::shared_ptr<ServerReaderContext<W, R>> p) : wp(p) {}
-    void Close() override {
-      auto sp = wp.lock();
-      if (sp) {
-        sp->Close();
-      }
-    }
+    void Close() override { CloseWP(wp); }
     bool Expired() override { return wp.expired(); }
   };
   template <class W, class R>
@@ -348,23 +267,13 @@ class Server {
     std::weak_ptr<ServerReaderWriterContext<W, R>> wp;
     ReaderWriterHolder(std::shared_ptr<ServerReaderWriterContext<W, R>> p)
         : wp(p) {}
-    void Close() override {
-      auto sp = wp.lock();
-      if (sp) {
-        sp->Close();
-      }
-    }
+    void Close() override { CloseWP(wp); }
     bool Expired() override { return wp.expired(); }
   };
   struct AlarmHolder : Holder {
     std::weak_ptr<Alarm> wp;
     AlarmHolder(std::shared_ptr<Alarm> p) : wp(p) {}
-    void Close() override {
-      auto sp = wp.lock();
-      if (sp) {
-        sp->Close();
-      }
-    }
+    void Close() override { CloseWP(wp); }
     bool Expired() override { return wp.expired(); }
   };
   std::vector<std::unique_ptr<Holder>> holders_;

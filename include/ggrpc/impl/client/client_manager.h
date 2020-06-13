@@ -42,65 +42,49 @@ class ClientManager {
     virtual ~Holder() {}
     virtual void Close() = 0;
     virtual bool Expired() = 0;
+
+   protected:
+    template <class T>
+    static void CloseWP(std::weak_ptr<T> wp) {
+      auto sp = wp.lock();
+      if (sp) {
+        sp->Close();
+      }
+    }
   };
   template <class W, class R>
   struct ResponseReaderHolder : Holder {
     std::weak_ptr<ClientResponseReader<W, R>> wp;
     ResponseReaderHolder(std::shared_ptr<ClientResponseReader<W, R>> p)
         : wp(p) {}
-    void Close() override {
-      auto sp = wp.lock();
-      if (sp) {
-        sp->Close();
-      }
-    }
+    void Close() override { CloseWP(wp); }
     bool Expired() override { return wp.expired(); }
   };
   template <class W, class R>
   struct ReaderHolder : Holder {
     std::weak_ptr<ClientReader<W, R>> wp;
     ReaderHolder(std::shared_ptr<ClientReader<W, R>> p) : wp(p) {}
-    void Close() override {
-      auto sp = wp.lock();
-      if (sp) {
-        sp->Close();
-      }
-    }
+    void Close() override { CloseWP(wp); }
     bool Expired() override { return wp.expired(); }
   };
   template <class W, class R>
   struct WriterHolder : Holder {
     std::weak_ptr<ClientWriter<W, R>> wp;
     WriterHolder(std::shared_ptr<ClientWriter<W, R>> p) : wp(p) {}
-    void Close() override {
-      auto sp = wp.lock();
-      if (sp) {
-        sp->Close();
-      }
-    }
+    void Close() override { CloseWP(wp); }
     bool Expired() override { return wp.expired(); }
   };
   template <class W, class R>
   struct ReaderWriterHolder : Holder {
     std::weak_ptr<ClientReaderWriter<W, R>> wp;
     ReaderWriterHolder(std::shared_ptr<ClientReaderWriter<W, R>> p) : wp(p) {}
-    void Close() override {
-      auto sp = wp.lock();
-      if (sp) {
-        sp->Close();
-      }
-    }
+    void Close() override { CloseWP(wp); }
     bool Expired() override { return wp.expired(); }
   };
   struct AlarmHolder : Holder {
     std::weak_ptr<Alarm> wp;
     AlarmHolder(std::shared_ptr<Alarm> p) : wp(p) {}
-    void Close() override {
-      auto sp = wp.lock();
-      if (sp) {
-        sp->Close();
-      }
-    }
+    void Close() override { CloseWP(wp); }
     bool Expired() override { return wp.expired(); }
   };
   std::vector<std::unique_ptr<Holder>> holders_;
@@ -173,74 +157,36 @@ class ClientManager {
   template <class W, class R>
   std::shared_ptr<ClientResponseReader<W, R>> CreateResponseReader(
       typename ClientResponseReader<W, R>::RequestFunc request) {
-    std::lock_guard<std::mutex> guard(mutex_);
-
-    Collect();
-
-    auto client_id = next_client_id_++;
-    auto cq = &threads_[client_id % threads_.size()].cq;
-
-    std::shared_ptr<ClientResponseReader<W, R>> p(
-        new ClientResponseReader<W, R>(cq, std::move(request)),
-        [](ClientResponseReader<W, R>* p) { p->Release(); });
-    holders_.push_back(
-        std::unique_ptr<Holder>(new ResponseReaderHolder<W, R>(p)));
-    return p;
+    return Create<ClientResponseReader<W, R>, ResponseReaderHolder<W, R>>(
+        std::move(request));
   }
 
   template <class W, class R>
   std::shared_ptr<ClientReader<W, R>> CreateReader(
       typename ClientReader<W, R>::ConnectFunc connect) {
-    std::lock_guard<std::mutex> guard(mutex_);
-
-    Collect();
-
-    auto client_id = next_client_id_++;
-    auto cq = &threads_[client_id % threads_.size()].cq;
-
-    std::shared_ptr<ClientReader<W, R>> p(
-        new ClientReader<W, R>(cq, std::move(connect)),
-        [](ClientReader<W, R>* p) { p->Release(); });
-    holders_.push_back(std::unique_ptr<Holder>(new ReaderHolder<W, R>(p)));
-    return p;
+    return Create<ClientReader<W, R>, ReaderHolder<W, R>>(std::move(connect));
   }
 
   template <class W, class R>
   std::shared_ptr<ClientWriter<W, R>> CreateWriter(
       typename ClientWriter<W, R>::ConnectFunc connect) {
-    std::lock_guard<std::mutex> guard(mutex_);
-
-    Collect();
-
-    auto client_id = next_client_id_++;
-    auto cq = &threads_[client_id % threads_.size()].cq;
-
-    std::shared_ptr<ClientWriter<W, R>> p(
-        new ClientWriter<W, R>(cq, std::move(connect)),
-        [](ClientWriter<W, R>* p) { p->Release(); });
-    holders_.push_back(std::unique_ptr<Holder>(new WriterHolder<W, R>(p)));
-    return p;
+    return Create<ClientWriter<W, R>, WriterHolder<W, R>>(std::move(connect));
   }
 
   template <class W, class R>
   std::shared_ptr<ClientReaderWriter<W, R>> CreateReaderWriter(
       typename ClientReaderWriter<W, R>::ConnectFunc connect) {
-    std::lock_guard<std::mutex> guard(mutex_);
-
-    Collect();
-
-    auto client_id = next_client_id_++;
-    auto cq = &threads_[client_id % threads_.size()].cq;
-
-    std::shared_ptr<ClientReaderWriter<W, R>> p(
-        new ClientReaderWriter<W, R>(cq, std::move(connect)),
-        [](ClientReaderWriter<W, R>* p) { p->Release(); });
-    holders_.push_back(
-        std::unique_ptr<Holder>(new ReaderWriterHolder<W, R>(p)));
-    return p;
+    return Create<ClientReaderWriter<W, R>, ReaderWriterHolder<W, R>>(
+        std::move(connect));
   }
 
   std::shared_ptr<Alarm> CreateAlarm() {
+    return Create<Alarm, AlarmHolder>();
+  }
+
+ private:
+  template <class T, class H, class... Args>
+  std::shared_ptr<T> Create(Args... args) {
     std::lock_guard<std::mutex> guard(mutex_);
 
     Collect();
@@ -248,8 +194,9 @@ class ClientManager {
     auto client_id = next_client_id_++;
     auto cq = &threads_[client_id % threads_.size()].cq;
 
-    std::shared_ptr<Alarm> p(new Alarm(cq), [](Alarm* p) { p->Release(); });
-    holders_.push_back(std::unique_ptr<Holder>(new AlarmHolder(p)));
+    std::shared_ptr<T> p(new T(cq, std::forward<Args>(args)...),
+                         [](T* p) { p->Release(); });
+    holders_.push_back(std::unique_ptr<Holder>(new H(p)));
     return p;
   }
 };
