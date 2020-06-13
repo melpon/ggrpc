@@ -179,6 +179,66 @@ class ClientResponseReader {
   void Close();
 };
 
+// サーバストリーミング用
+enum class ClientReaderError {
+  CONNECT,
+  READ,
+};
+
+template <class W, class R>
+class ClientReader {
+ public:
+  typedef std::function<std::unique_ptr<grpc::ClientAsyncReader<R>>(
+      grpc::ClientContext*, const W&, grpc::CompletionQueue*, void*)>
+      ConnectFunc;
+  typedef std::function<void()> OnConnectFunc;
+  typedef std::function<void(R)> OnReadFunc;
+  typedef std::function<void(grpc::Status)> OnReadDoneFunc;
+  typedef std::function<void(ClientReaderError)> OnErrorFunc;
+
+  void SetOnConnect(OnConnectFunc on_connect);
+  void SetOnRead(OnReadFunc on_read);
+  void SetOnReadDone(OnReadDoneFunc on_read_done);
+  void SetOnError(OnErrorFunc on_error);
+
+  void Connect(const W& request);
+
+  void Close();
+};
+
+// クライアントストリーミング用
+enum class ClientWriterError {
+  CONNECT,
+  READ,
+  WRITE,
+};
+
+template <class W, class R>
+class ClientWriter {
+ public:
+  typedef std::function<std::unique_ptr<grpc::ClientAsyncWriter<W>>(
+      grpc::ClientContext*, R*, grpc::CompletionQueue*, void*)>
+      ConnectFunc;
+  typedef std::function<void()> OnConnectFunc;
+  typedef std::function<void(R, grpc::Status)> OnResponseFunc;
+  typedef std::function<void(ClientWriterError)> OnErrorFunc;
+  typedef std::function<void(W, int64_t)> OnWriteFunc;
+  typedef std::function<void()> OnWritesDoneFunc;
+
+  void SetOnConnect(OnConnectFunc on_connect);
+  void SetOnResponse(OnResponseFunc on_response);
+  void SetOnWrite(OnWriteFunc on_write);
+  void SetOnWritesDone(OnWritesDoneFunc on_writes_done);
+  void SetOnError(OnErrorFunc on_error);
+
+  void Connect();
+
+  void Close();
+
+  void Write(W request, int64_t id = 0);
+  void WritesDone();
+};
+
 // 双方向ストリーミング用
 enum class ClientReaderWriterError {
   CONNECT,
@@ -224,6 +284,14 @@ public:
   template <class W, class R>
   std::shared_ptr<ClientResponseReader<W, R>> CreateResponseReader(
       typename ClientResponseReader<W, R>::RequestFunc request);
+
+  template <class W, class R>
+  std::shared_ptr<ClientReader<W, R>> CreateReader(
+      typename ClientReader<W, R>::ConnectFunc connect);
+
+  template <class W, class R>
+  std::shared_ptr<ClientWriter<W, R>> CreateWriter(
+      typename ClientWriter<W, R>::ConnectFunc connect);
 
   template <class W, class R>
   std::shared_ptr<ClientReaderWriter<W, R>> CreateReaderWriter(
@@ -295,6 +363,35 @@ class ServerWriterHandler {
   virtual void OnError(ServerWriterError error) {}
 };
 
+// クライアントストリーミング用
+enum class ServerReaderError {
+  WRITE,
+};
+
+template <class W, class R>
+class ServerReaderContext {
+ public:
+  Server* GetServer() const;
+  void Finish(W resp, grpc::Status status);
+  void FinishWithError(grpc::Status status);
+  void Close();
+};
+
+template <class W, class R>
+class ServerReaderHandler {
+ public:
+  std::shared_ptr<ServerReaderContext<W, R>> Context() const;
+
+  virtual void Request(grpc::ServerContext* context,
+                       grpc::ServerAsyncReader<W, R>* streamer,
+                       grpc::ServerCompletionQueue* cq, void* tag) = 0;
+  virtual void OnAccept() {}
+  virtual void OnRead(R req) {}
+  virtual void OnReadDoneOrError() {}
+  virtual void OnFinish(W response, grpc::Status status) {}
+  virtual void OnError(ServerReaderError error) {}
+};
+
 // 双方向ストリーミング用
 enum class ServerReaderWriterError {
   WRITE,
@@ -331,6 +428,12 @@ class Server {
   void AddResponseWriterHandler(Args... args);
 
   template <class H, class... Args>
+  void AddWriterHandler(Args... args);
+
+  template <class H, class... Args>
+  void AddReaderHandler(Args... args);
+
+  template <class H, class... Args>
   void AddReaderWriterHandler(Args... args);
 
   void Start(grpc::ServerBuilder& builder, int threads);
@@ -364,6 +467,5 @@ class Alarm {
 ## TODO
 
 - ドキュメント書く
-- クライアントストリーミングを実装する
 - spdlog 依存を無くす
 - pubsub 的なサンプルを書く
