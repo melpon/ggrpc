@@ -75,8 +75,8 @@ void RunCallbackClient(std::unique_lock<std::mutex>& lock, int& nesting,
 template <class Context, class T, class MemF, class... Args>
 void RunCallbackServer(std::unique_lock<std::mutex>& lock, int& nesting,
                        std::shared_ptr<Context>& tmp_context,
-                       std::shared_ptr<Context> context, std::string funcname,
-                       T* p, MemF mf, Args&&... args) {
+                       const std::shared_ptr<Context>& context,
+                       std::string funcname, T* p, MemF mf, Args&&... args) {
   // コールバック中は tmp_context を有効にする
   if (nesting == 0) {
     tmp_context = context;
