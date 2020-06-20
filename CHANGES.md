@@ -11,6 +11,8 @@
 
 ## master
 
+## 0.4.0 (2020-06-21)
+
 - [CHANGE] ディレクトリ構成を変更して、`<ggrpc/ggrpc.h>` をインクルードして使うようにした
 - [CHANGE] クライアントの `OnReadDone`, `OnResponse` を `OnFinish` に変更
 - [CHANGE] `ClientResponseReader` の `Request` を `Connect` に変更
