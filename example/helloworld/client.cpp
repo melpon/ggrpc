@@ -20,7 +20,7 @@ int main() {
       helloworld::Greeter::NewStub(channel));
 
   // SayHello リクエストを送るクライアントを作る
-  SayHelloClient::RequestFunc request = [stub = stub.get()](
+  SayHelloClient::ConnectFunc connect = [stub = stub.get()](
                                             grpc::ClientContext* context,
                                             const helloworld::HelloRequest& req,
                                             grpc::CompletionQueue* cq) {
@@ -28,24 +28,23 @@ int main() {
   };
   std::shared_ptr<SayHelloClient> client =
       cm.CreateResponseReader<helloworld::HelloRequest,
-                              helloworld::HelloResponse>(request);
+                              helloworld::HelloResponse>(connect);
 
   // レスポンスが返ってきた時の処理
-  client->SetOnResponse(
-      [](helloworld::HelloResponse resp, grpc::Status status) {
-        std::cout << resp.message() << std::endl;
-      });
+  client->SetOnFinish([](helloworld::HelloResponse resp, grpc::Status status) {
+    std::cout << resp.message() << std::endl;
+  });
 
   // リクエスト送信
   helloworld::HelloRequest req;
   req.set_name("melpon");
-  client->Request(req);
+  client->Connect(req);
 
   std::this_thread::sleep_for(std::chrono::seconds(1));
 
   // 送信直後、レスポンスを受け取る前にクライアントマネージャを Shutdown しても大丈夫
   // （cm 経由で作った全てのクライアントに対して client->Close() する）
   req.set_name("melponnn");
-  client->Request(req);
+  client->Connect(req);
   cm.Shutdown();
 }

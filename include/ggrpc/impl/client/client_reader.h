@@ -34,7 +34,7 @@ class ClientReader {
       ConnectFunc;
   typedef std::function<void()> OnConnectFunc;
   typedef std::function<void(R)> OnReadFunc;
-  typedef std::function<void(grpc::Status)> OnReadDoneFunc;
+  typedef std::function<void(grpc::Status)> OnFinishFunc;
   typedef std::function<void(ClientReaderError)> OnErrorFunc;
 
  private:
@@ -68,7 +68,7 @@ class ClientReader {
   ConnectFunc connect_;
   OnConnectFunc on_connect_;
   OnReadFunc on_read_;
-  OnReadDoneFunc on_read_done_;
+  OnFinishFunc on_finish_;
   OnErrorFunc on_error_;
 
   struct SafeDeleter {
@@ -116,12 +116,12 @@ class ClientReader {
     }
     on_read_ = std::move(on_read);
   }
-  void SetOnReadDone(OnReadDoneFunc on_read_done) {
+  void SetOnFinish(OnFinishFunc on_finish) {
     std::lock_guard<std::mutex> guard(mutex_);
     if (read_status_ != ReadStatus::INIT) {
       return;
     }
-    on_read_done_ = std::move(on_read_done);
+    on_finish_ = std::move(on_finish);
   }
   void SetOnError(OnErrorFunc on_error) {
     std::lock_guard<std::mutex> guard(mutex_);
@@ -182,14 +182,14 @@ class ClientReader {
 
     auto on_connect = std::move(on_connect_);
     auto on_read = std::move(on_read_);
-    auto on_read_done = std::move(on_read_done_);
+    auto on_finish = std::move(on_finish_);
     auto on_error = std::move(on_error_);
 
     ++nesting_;
     lock.unlock();
     on_connect = nullptr;
     on_read = nullptr;
-    on_read_done = nullptr;
+    on_finish = nullptr;
     on_error = nullptr;
     lock.lock();
     --nesting_;
@@ -284,7 +284,7 @@ class ClientReader {
       }
       // 正常終了
       read_status_ = ReadStatus::FINISHED;
-      RunCallback(d.lock, "OnReadDone", on_read_done_, grpc_status_);
+      RunCallback(d.lock, "OnFinish", on_finish_, grpc_status_);
       Done(d.lock);
     }
   }

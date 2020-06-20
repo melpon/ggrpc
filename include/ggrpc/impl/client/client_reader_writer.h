@@ -36,7 +36,7 @@ class ClientReaderWriter {
       ConnectFunc;
   typedef std::function<void()> OnConnectFunc;
   typedef std::function<void(R)> OnReadFunc;
-  typedef std::function<void(grpc::Status)> OnReadDoneFunc;
+  typedef std::function<void(grpc::Status)> OnFinishFunc;
   typedef std::function<void(ClientReaderWriterError)> OnErrorFunc;
   typedef std::function<void(W, int64_t)> OnWriteFunc;
   typedef std::function<void()> OnWritesDoneFunc;
@@ -95,7 +95,7 @@ class ClientReaderWriter {
   ConnectFunc connect_;
   OnConnectFunc on_connect_;
   OnReadFunc on_read_;
-  OnReadDoneFunc on_read_done_;
+  OnFinishFunc on_finish_;
   OnErrorFunc on_error_;
   OnWriteFunc on_write_;
   OnWritesDoneFunc on_writes_done_;
@@ -150,13 +150,13 @@ class ClientReaderWriter {
     }
     on_read_ = std::move(on_read);
   }
-  void SetOnReadDone(OnReadDoneFunc on_read_done) {
+  void SetOnFinish(OnFinishFunc on_finish) {
     std::lock_guard<std::mutex> guard(mutex_);
     if (read_status_ != ReadStatus::INIT ||
         write_status_ != WriteStatus::INIT) {
       return;
     }
-    on_read_done_ = std::move(on_read_done);
+    on_finish_ = std::move(on_finish);
   }
   void SetOnWrite(OnWriteFunc on_write) {
     std::lock_guard<std::mutex> guard(mutex_);
@@ -247,7 +247,7 @@ class ClientReaderWriter {
 
     auto on_connect = std::move(on_connect_);
     auto on_read = std::move(on_read_);
-    auto on_read_done = std::move(on_read_done_);
+    auto on_finish = std::move(on_finish_);
     auto on_write = std::move(on_write_);
     auto on_writes_done = std::move(on_writes_done_);
     auto on_error = std::move(on_error_);
@@ -256,7 +256,7 @@ class ClientReaderWriter {
     lock.unlock();
     on_connect = nullptr;
     on_read = nullptr;
-    on_read_done = nullptr;
+    on_finish = nullptr;
     on_write = nullptr;
     on_writes_done = nullptr;
     on_error = nullptr;
@@ -413,7 +413,7 @@ class ClientReaderWriter {
       } else {
         write_status_ = WriteStatus::FINISHED;
       }
-      RunCallback(d.lock, "OnReadDone", on_read_done_, grpc_status_);
+      RunCallback(d.lock, "OnFinish", on_finish_, grpc_status_);
       Done(d.lock);
     }
   }

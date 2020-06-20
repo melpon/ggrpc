@@ -35,7 +35,7 @@ class ClientWriter {
       grpc::ClientContext*, R*, grpc::CompletionQueue*, void*)>
       ConnectFunc;
   typedef std::function<void()> OnConnectFunc;
-  typedef std::function<void(R, grpc::Status)> OnResponseFunc;
+  typedef std::function<void(R, grpc::Status)> OnFinishFunc;
   typedef std::function<void(ClientWriterError)> OnErrorFunc;
   typedef std::function<void(W, int64_t)> OnWriteFunc;
   typedef std::function<void()> OnWritesDoneFunc;
@@ -86,7 +86,7 @@ class ClientWriter {
   grpc::CompletionQueue* cq_;
   ConnectFunc connect_;
   OnConnectFunc on_connect_;
-  OnResponseFunc on_response_;
+  OnFinishFunc on_finish_;
   OnErrorFunc on_error_;
   OnWriteFunc on_write_;
   OnWritesDoneFunc on_writes_done_;
@@ -132,13 +132,13 @@ class ClientWriter {
     }
     on_connect_ = std::move(on_connect);
   }
-  void SetOnResponse(OnResponseFunc on_response) {
+  void SetOnFinish(OnFinishFunc on_finish) {
     std::lock_guard<std::mutex> guard(mutex_);
     if (read_status_ != ReadStatus::INIT ||
         write_status_ != WriteStatus::INIT) {
       return;
     }
-    on_response_ = std::move(on_response);
+    on_finish_ = std::move(on_finish);
   }
   void SetOnWrite(OnWriteFunc on_write) {
     std::lock_guard<std::mutex> guard(mutex_);
@@ -226,7 +226,7 @@ class ClientWriter {
     }
 
     auto on_connect = std::move(on_connect_);
-    auto on_response = std::move(on_response_);
+    auto on_finish = std::move(on_finish_);
     auto on_write = std::move(on_write_);
     auto on_writes_done = std::move(on_writes_done_);
     auto on_error = std::move(on_error_);
@@ -234,7 +234,7 @@ class ClientWriter {
     ++nesting_;
     lock.unlock();
     on_connect = nullptr;
-    on_response = nullptr;
+    on_finish = nullptr;
     on_write = nullptr;
     on_writes_done = nullptr;
     on_error = nullptr;
@@ -367,7 +367,7 @@ class ClientWriter {
     } else {
       write_status_ = WriteStatus::FINISHED;
     }
-    RunCallback(d.lock, "OnResponse", on_response_, std::move(response_),
+    RunCallback(d.lock, "OnFinish", on_finish_, std::move(response_),
                 grpc_status_);
     Done(d.lock);
   }

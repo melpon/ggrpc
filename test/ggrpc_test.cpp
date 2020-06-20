@@ -305,9 +305,9 @@ void test_client_unary() {
   {
     auto unary = cm.CreateUnary();
     req.set_value(100);
-    unary->SetOnResponse(
+    unary->SetOnFinish(
         [unary](gg::UnaryResponse resp, grpc::Status) { unary->Close(); });
-    unary->Request(req);
+    unary->Connect(req);
     unary.reset();
     std::this_thread::sleep_for(std::chrono::seconds(2));
   }
@@ -315,9 +315,9 @@ void test_client_unary() {
   {
     auto unary = cm.CreateUnary();
     req.set_value(100);
-    unary->SetOnResponse(
+    unary->SetOnFinish(
         [unary](gg::UnaryResponse resp, grpc::Status) { unary->Close(); });
-    unary->Request(req);
+    unary->Connect(req);
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
   }
 }
@@ -368,7 +368,7 @@ void test_client_cstream() {
   {
     auto cs = cm.CreateCstream();
     std::atomic<int> n = 0;
-    cs->SetOnResponse(
+    cs->SetOnFinish(
         [&n](gg::CstreamResponse resp, grpc::Status) { n = resp.value(); });
 
     cs->Connect();
@@ -387,7 +387,7 @@ void test_client_cstream() {
   {
     auto cs = cm.CreateCstream();
     std::atomic<int> n = 0;
-    cs->SetOnResponse(
+    cs->SetOnFinish(
         [&n](gg::CstreamResponse resp, grpc::Status) { n = resp.value(); });
 
     cs->Connect();

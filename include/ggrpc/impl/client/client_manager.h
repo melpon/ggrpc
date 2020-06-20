@@ -156,9 +156,9 @@ class ClientManager {
 
   template <class W, class R>
   std::shared_ptr<ClientResponseReader<W, R>> CreateResponseReader(
-      typename ClientResponseReader<W, R>::RequestFunc request) {
+      typename ClientResponseReader<W, R>::ConnectFunc connect) {
     return Create<ClientResponseReader<W, R>, ResponseReaderHolder<W, R>>(
-        std::move(request));
+        std::move(connect));
   }
 
   template <class W, class R>

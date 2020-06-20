@@ -49,7 +49,7 @@ int main() {
       helloworld::Greeter::NewStub(channel));
 
   // SayHello リクエストを送るクライアントを作る
-  SayHelloClient::RequestFunc request = [stub = stub.get()](
+  SayHelloClient::ConnectFunc connect = [stub = stub.get()](
                                             grpc::ClientContext* context,
                                             const helloworld::HelloRequest& req,
                                             grpc::CompletionQueue* cq) {
@@ -57,25 +57,24 @@ int main() {
   };
   std::shared_ptr<SayHelloClient> client =
       cm.CreateResponseReader<helloworld::HelloRequest,
-                              helloworld::HelloResponse>(request);
+                              helloworld::HelloResponse>(connect);
 
   // レスポンスが返ってきた時の処理
-  client->SetOnResponse(
-      [](helloworld::HelloResponse resp, grpc::Status status) {
-        std::cout << resp.message() << std::endl;
-      });
+  client->SetOnFinish([](helloworld::HelloResponse resp, grpc::Status status) {
+    std::cout << resp.message() << std::endl;
+  });
 
   // リクエスト送信
   helloworld::HelloRequest req;
   req.set_name("melpon");
-  client->Request(req);
+  client->Connect(req);
 
   std::this_thread::sleep_for(std::chrono::seconds(1));
 
   // 送信直後、レスポンスを受け取る前にクライアントマネージャを Shutdown しても大丈夫
   // （cm 経由で作った全てのクライアントに対して client->Close() する）
   req.set_name("melponnn");
-  client->Request(req);
+  client->Connect(req);
   cm.Shutdown();
 }
 ```
@@ -167,14 +166,14 @@ class ClientResponseReader {
  public:
   typedef std::function<std::unique_ptr<grpc::ClientAsyncResponseReader<R>>(
       grpc::ClientContext*, const W&, grpc::CompletionQueue*)>
-      RequestFunc;
-  typedef std::function<void(R, grpc::Status)> OnResponseFunc;
+      ConnectFunc;
+  typedef std::function<void(R, grpc::Status)> OnFinishFunc;
   typedef std::function<void(ClientResponseWriterError)> OnErrorFunc;
 
-  void SetOnResponse(OnResponseFunc on_response);
+  void SetOnFinish(OnFinishFunc on_finish);
   void SetOnError(OnErrorFunc on_error);
 
-  void Request(const W& request);
+  void Connect(const W& request);
 
   void Close();
 };
@@ -193,12 +192,12 @@ class ClientReader {
       ConnectFunc;
   typedef std::function<void()> OnConnectFunc;
   typedef std::function<void(R)> OnReadFunc;
-  typedef std::function<void(grpc::Status)> OnReadDoneFunc;
+  typedef std::function<void(grpc::Status)> OnFinishFunc;
   typedef std::function<void(ClientReaderError)> OnErrorFunc;
 
   void SetOnConnect(OnConnectFunc on_connect);
   void SetOnRead(OnReadFunc on_read);
-  void SetOnReadDone(OnReadDoneFunc on_read_done);
+  void SetOnFinish(OnFinishFunc on_finish);
   void SetOnError(OnErrorFunc on_error);
 
   void Connect(const W& request);
@@ -220,13 +219,13 @@ class ClientWriter {
       grpc::ClientContext*, R*, grpc::CompletionQueue*, void*)>
       ConnectFunc;
   typedef std::function<void()> OnConnectFunc;
-  typedef std::function<void(R, grpc::Status)> OnResponseFunc;
+  typedef std::function<void(R, grpc::Status)> OnFinishFunc;
   typedef std::function<void(ClientWriterError)> OnErrorFunc;
   typedef std::function<void(W, int64_t)> OnWriteFunc;
   typedef std::function<void()> OnWritesDoneFunc;
 
   void SetOnConnect(OnConnectFunc on_connect);
-  void SetOnResponse(OnResponseFunc on_response);
+  void SetOnFinish(OnFinishFunc on_finish);
   void SetOnWrite(OnWriteFunc on_write);
   void SetOnWritesDone(OnWritesDoneFunc on_writes_done);
   void SetOnError(OnErrorFunc on_error);
@@ -254,14 +253,14 @@ class ClientReaderWriter {
       ConnectFunc;
   typedef std::function<void()> OnConnectFunc;
   typedef std::function<void(R)> OnReadFunc;
-  typedef std::function<void(grpc::Status)> OnReadDoneFunc;
+  typedef std::function<void(grpc::Status)> OnFinishFunc;
   typedef std::function<void(ClientReaderWriterError)> OnErrorFunc;
   typedef std::function<void(W, int64_t)> OnWriteFunc;
   typedef std::function<void()> OnWritesDoneFunc;
 
   void SetOnConnect(OnConnectFunc on_connect);
   void SetOnRead(OnReadFunc on_read);
-  void SetOnReadDone(OnReadDoneFunc on_read_done);
+  void SetOnFinish(OnFinishFunc on_finish);
   void SetOnWrite(OnWriteFunc on_write);
   void SetOnWritesDone(OnWritesDoneFunc on_writes_done);
   void SetOnError(OnErrorFunc on_error);

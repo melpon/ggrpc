@@ -30,8 +30,8 @@ class ClientResponseReader {
  public:
   typedef std::function<std::unique_ptr<grpc::ClientAsyncResponseReader<R>>(
       grpc::ClientContext*, const W&, grpc::CompletionQueue*)>
-      RequestFunc;
-  typedef std::function<void(R, grpc::Status)> OnResponseFunc;
+      ConnectFunc;
+  typedef std::function<void(R, grpc::Status)> OnFinishFunc;
   typedef std::function<void(ClientResponseReaderError)> OnErrorFunc;
 
  private:
@@ -44,7 +44,7 @@ class ClientResponseReader {
   R response_;
   grpc::Status grpc_status_;
 
-  enum class Status { INIT, REQUESTING, CANCELING, DONE };
+  enum class Status { INIT, CONNECTING, CANCELING, DONE };
   Status status_ = Status::INIT;
   bool release_ = false;
   int nesting_ = 0;
@@ -52,8 +52,8 @@ class ClientResponseReader {
 
   grpc::CompletionQueue* cq_;
 
-  RequestFunc request_;
-  OnResponseFunc on_response_;
+  ConnectFunc connect_;
+  OnFinishFunc on_finish_;
   OnErrorFunc on_error_;
 
   struct SafeDeleter {
@@ -72,8 +72,8 @@ class ClientResponseReader {
   };
   friend struct SafeDeleter;
 
-  ClientResponseReader(grpc::CompletionQueue* cq, RequestFunc request)
-      : reader_thunk_(this), cq_(cq), request_(std::move(request)) {}
+  ClientResponseReader(grpc::CompletionQueue* cq, ConnectFunc connect)
+      : reader_thunk_(this), cq_(cq), connect_(std::move(connect)) {}
   ~ClientResponseReader() { SPDLOG_TRACE("[0x{}] deleted", (void*)this); }
 
   // コピー、ムーブ禁止
@@ -83,12 +83,12 @@ class ClientResponseReader {
   ClientResponseReader& operator=(ClientResponseReader&&) = delete;
 
  public:
-  void SetOnResponse(OnResponseFunc on_response) {
+  void SetOnFinish(OnFinishFunc on_finish) {
     std::lock_guard<std::mutex> guard(mutex_);
     if (status_ == Status::DONE) {
       return;
     }
-    on_response_ = std::move(on_response);
+    on_finish_ = std::move(on_finish);
   }
   void SetOnError(OnErrorFunc on_error) {
     std::lock_guard<std::mutex> guard(mutex_);
@@ -98,14 +98,14 @@ class ClientResponseReader {
     on_error_ = std::move(on_error);
   }
 
-  void Request(const W& request) {
+  void Connect(const W& connect) {
     std::lock_guard<std::mutex> guard(mutex_);
     if (status_ != Status::INIT) {
       return;
     }
-    status_ = Status::REQUESTING;
+    status_ = Status::CONNECTING;
 
-    reader_ = request_(&context_, request, cq_);
+    reader_ = connect_(&context_, connect, cq_);
     reader_->Finish(&response_, &grpc_status_, &reader_thunk_);
   }
 
@@ -128,7 +128,7 @@ class ClientResponseReader {
 
  private:
   void DoClose(std::unique_lock<std::mutex>& lock) {
-    if (status_ == Status::REQUESTING) {
+    if (status_ == Status::CONNECTING) {
       context_.TryCancel();
       status_ = Status::CANCELING;
       return;
@@ -147,12 +147,12 @@ class ClientResponseReader {
       return;
     }
 
-    auto on_response = std::move(on_response_);
+    auto on_finish = std::move(on_finish_);
     auto on_error = std::move(on_error_);
 
     ++nesting_;
     lock.unlock();
-    on_response = nullptr;
+    on_finish = nullptr;
     on_error = nullptr;
     lock.lock();
     --nesting_;
@@ -171,14 +171,14 @@ class ClientResponseReader {
     SPDLOG_TRACE("[0x{}] ProceedToRead: ok={} status={} grpc_status={}",
                  (void*)this, ok, (int)status_, grpc_status_.error_message());
 
-    assert(status_ == Status::REQUESTING || status_ == Status::CANCELING);
+    assert(status_ == Status::CONNECTING || status_ == Status::CANCELING);
 
     auto st = status_;
     status_ = Status::DONE;
 
     if (!ok) {
       SPDLOG_ERROR("finishing error");
-      if (st == Status::REQUESTING) {
+      if (st == Status::CONNECTING) {
         RunCallback(d.lock, "OnError", on_error_,
                     ClientResponseReaderError::FINISH);
       }
@@ -187,8 +187,8 @@ class ClientResponseReader {
     }
 
     // 結果が取得できた
-    if (st == Status::REQUESTING) {
-      RunCallback(d.lock, "OnResponse", on_response_, std::move(response_),
+    if (st == Status::CONNECTING) {
+      RunCallback(d.lock, "OnResponse", on_finish_, std::move(response_),
                   std::move(grpc_status_));
     }
     Done(d.lock);
