@@ -163,13 +163,17 @@ typedef ggrpc::ClientWriter<gg::CstreamRequest, gg::CstreamResponse>
     CstreamClient;
 typedef ggrpc::ClientReaderWriter<gg::BidiRequest, gg::BidiResponse> BidiClient;
 
+typedef ggrpc::ClientResponseReader<grpc::ByteBuffer, grpc::ByteBuffer>
+    UnaryClientGeneric;
+
 class TestClientManager {
   ggrpc::ClientManager cm_;
   std::unique_ptr<gg::Test::Stub> stub_;
+  std::shared_ptr<grpc::Channel> channel_;
 
  public:
   TestClientManager(std::shared_ptr<grpc::Channel> channel, int threads)
-      : cm_(10), stub_(gg::Test::NewStub(channel)) {}
+      : cm_(threads), stub_(gg::Test::NewStub(channel)), channel_(channel) {}
   void Start() { cm_.Start(); }
 
   ggrpc::ClientManager* ClientManager() { return &cm_; }
@@ -180,6 +184,20 @@ class TestClientManager {
                              const gg::UnaryRequest& request,
                              grpc::CompletionQueue* cq) {
           return stub->AsyncUnary(context, request, cq);
+        });
+  }
+  std::shared_ptr<UnaryClientGeneric> CreateUnaryGeneric() {
+    return cm_.CreateResponseReader<grpc::ByteBuffer, grpc::ByteBuffer>(
+        [channel = channel_](grpc::ClientContext* context,
+                             const grpc::ByteBuffer& request,
+                             grpc::CompletionQueue* cq) {
+          grpc::internal::RpcMethod method(
+              "/gg.Test/Unary", grpc::internal::RpcMethod::NORMAL_RPC, channel);
+          return std::unique_ptr<
+              grpc::ClientAsyncResponseReader<grpc::ByteBuffer>>(
+              grpc_impl::internal::ClientAsyncResponseReaderFactory<
+                  grpc::ByteBuffer>::Create(channel.get(), cq, method, context,
+                                            request, true));
         });
   }
 
@@ -213,7 +231,7 @@ class TestClientManager {
 // Bidiクライアントの接続コールバック時にいろいろやってもちゃんと動くか
 void test_client_bidi_connect_callback() {
   TestServer server;
-  server.Start("0.0.0.0:50051", 10);
+  server.Start("localhost:50051", 10);
   std::this_thread::sleep_for(std::chrono::seconds(2));
 
   auto channel = grpc::CreateChannel("localhost:50051",
@@ -292,7 +310,7 @@ void test_client_bidi_connect_callback() {
 
 void test_client_unary() {
   TestServer server;
-  server.Start("0.0.0.0:50051", 10);
+  server.Start("localhost:50051", 10);
   std::this_thread::sleep_for(std::chrono::seconds(2));
 
   auto channel = grpc::CreateChannel("localhost:50051",
@@ -324,7 +342,7 @@ void test_client_unary() {
 
 void test_client_sstream() {
   TestServer server;
-  server.Start("0.0.0.0:50051", 10);
+  server.Start("localhost:50051", 10);
   std::this_thread::sleep_for(std::chrono::seconds(2));
 
   auto channel = grpc::CreateChannel("localhost:50051",
@@ -355,7 +373,7 @@ void test_client_sstream() {
 
 void test_client_cstream() {
   TestServer server;
-  server.Start("0.0.0.0:50051", 10);
+  server.Start("localhost:50051", 10);
   std::this_thread::sleep_for(std::chrono::seconds(2));
 
   auto channel = grpc::CreateChannel("localhost:50051",
@@ -409,7 +427,7 @@ void test_client_cstream() {
 
 void test_server() {
   TestServer server;
-  server.Start("0.0.0.0:50051", 1);
+  server.Start("localhost:50051", 1);
   std::this_thread::sleep_for(std::chrono::seconds(1));
 }
 
@@ -506,7 +524,7 @@ void test_client_alarm() {
 
 void test_server_alarm() {
   TestServer server;
-  server.Start("0.0.0.0:50051", 10);
+  server.Start("localhost:50051", 10);
   std::this_thread::sleep_for(std::chrono::seconds(2));
 
   auto alarm = server.Server()->CreateAlarm();
@@ -527,6 +545,47 @@ void test_server_alarm() {
   ASSERT(b == false);
 }
 
+void test_client_generic() {
+  TestServer server;
+  server.Start("localhost:50051", 10);
+  std::this_thread::sleep_for(std::chrono::seconds(2));
+
+  auto channel = grpc::CreateChannel("localhost:50051",
+                                     grpc::InsecureChannelCredentials());
+  TestClientManager cm(channel, 10);
+  cm.Start();
+
+  gg::UnaryRequest req;
+
+  {
+    grpc::ByteBuffer buf;
+
+    auto unary = cm.CreateUnaryGeneric();
+    req.set_value(100);
+
+    bool own_buf;
+    auto result = grpc::SerializationTraits<gg::UnaryRequest, void>::Serialize(
+        req, &buf, &own_buf);
+    ASSERT(result.ok());
+    if (!own_buf) {
+      buf.Duplicate();
+    }
+
+    unary->SetOnFinish([unary](grpc::ByteBuffer buf, grpc::Status) {
+      gg::UnaryResponse resp;
+      auto result =
+          grpc::SerializationTraits<gg::UnaryResponse, void>::Deserialize(
+              &buf, &resp);
+      ASSERT(result.ok());
+      ASSERT(resp.value() == 10000);
+      unary->Close();
+    });
+    unary->Connect(std::move(buf));
+    unary.reset();
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+  }
+}
+
 int main() {
   spdlog::set_level(spdlog::level::trace);
 
@@ -537,4 +596,5 @@ int main() {
   test_server();
   test_client_alarm();
   test_server_alarm();
+  test_client_generic();
 }
