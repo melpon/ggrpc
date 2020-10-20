@@ -159,6 +159,7 @@ namespace ggrpc {
 // 単体リクエスト用
 enum class ClientResponseWriterError {
   FINISH,
+  TIMEOUT,
 };
 
 template <class W, class R>
@@ -172,6 +173,7 @@ class ClientResponseReader {
 
   void SetOnFinish(OnFinishFunc on_finish);
   void SetOnError(OnErrorFunc on_error);
+  void SetTimeout(std::chrono::milliseconds timeout);
 
   void Connect(const W& request);
 
