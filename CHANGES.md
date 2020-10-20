@@ -11,6 +11,8 @@
 
 ## master
 
+## 0.5.0 (2020-10-21)
+
 - [ADD] `ClientResponseReader` にタイムアウトを実装
 - [FIX] CANCELING 中に Close すると間違った状態になるのを修正
 - [FIX] clang だとオブジェクトが正しく解放されないのを修正
