@@ -167,6 +167,7 @@ class ClientReader {
     }
     if (read_status_ == ReadStatus::CONNECTING ||
         read_status_ == ReadStatus::READING ||
+        read_status_ == ReadStatus::CANCELING ||
         read_status_ == ReadStatus::FINISHING) {
       read_status_ = ReadStatus::CANCELING;
     } else {
@@ -184,6 +185,10 @@ class ClientReader {
     auto on_read = std::move(on_read_);
     auto on_finish = std::move(on_finish_);
     auto on_error = std::move(on_error_);
+    on_connect_ = nullptr;
+    on_read_ = nullptr;
+    on_finish_ = nullptr;
+    on_error_ = nullptr;
 
     ++nesting_;
     lock.unlock();
@@ -198,8 +203,8 @@ class ClientReader {
  private:
   template <class F, class... Args>
   void RunCallback(std::unique_lock<std::mutex>& lock, std::string funcname,
-                   F f, Args&&... args) {
-    detail::RunCallbackClient(lock, nesting_, std::move(funcname), std::move(f),
+                   F& f, Args&&... args) {
+    detail::RunCallbackClient(lock, nesting_, std::move(funcname), f,
                               std::forward<Args>(args)...);
   }
 
@@ -271,7 +276,8 @@ class ClientReader {
       read_status_ = ReadStatus::READING;
 
       // 読み込み成功コールバック
-      RunCallback(d.lock, "OnRead", on_read_, std::move(resp));
+      auto on_read = on_read_;
+      RunCallback(d.lock, "OnRead", on_read, std::move(resp));
     } else if (read_status_ == ReadStatus::FINISHING) {
       // 終了
 

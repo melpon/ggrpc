@@ -586,6 +586,50 @@ void test_client_generic() {
   }
 }
 
+void test_client_unary_timeout() {
+  TestServer server;
+  server.Start("localhost:50051", 10);
+  std::this_thread::sleep_for(std::chrono::seconds(1));
+
+  auto channel = grpc::CreateChannel("localhost:50051",
+                                     grpc::InsecureChannelCredentials());
+  TestClientManager cm(channel, 10);
+  cm.Start();
+
+  gg::UnaryRequest req;
+
+  {
+    auto unary = cm.CreateUnary();
+    req.set_value(100);
+    unary->SetTimeout(std::chrono::milliseconds(1500));
+    unary->SetOnFinish([unary](gg::UnaryResponse resp, grpc::Status status) {
+      ASSERT(status.ok());
+      ASSERT(resp.value() == 10000);
+    });
+    unary->SetOnError(
+        [unary](ggrpc::ClientResponseReaderError error) { ASSERT(false); });
+    unary->Connect(req);
+    unary.reset();
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+  }
+
+  {
+    auto unary = cm.CreateUnary();
+    req.set_value(100);
+    unary->SetTimeout(std::chrono::milliseconds(100));
+    unary->SetOnFinish([unary](gg::UnaryResponse resp, grpc::Status status) {
+      ASSERT(false);
+    });
+    unary->SetOnError([unary](ggrpc::ClientResponseReaderError error) {
+      ASSERT(error == ggrpc::ClientResponseReaderError::TIMEOUT);
+      unary->Close();
+    });
+    unary->Connect(req);
+    unary.reset();
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+  }
+}
+
 int main() {
   spdlog::set_level(spdlog::level::trace);
 
@@ -597,4 +641,5 @@ int main() {
   test_client_alarm();
   test_server_alarm();
   test_client_generic();
+  test_client_unary_timeout();
 }

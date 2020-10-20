@@ -204,6 +204,7 @@ class ClientWriter {
       context_.TryCancel();
     }
     if (read_status_ == ReadStatus::CONNECTING ||
+        read_status_ == ReadStatus::CANCELING ||
         read_status_ == ReadStatus::FINISHING) {
       read_status_ = ReadStatus::CANCELING;
     } else {
@@ -211,6 +212,7 @@ class ClientWriter {
     }
     if (write_status_ == WriteStatus::CONNECTING ||
         write_status_ == WriteStatus::WRITING ||
+        write_status_ == WriteStatus::CANCELING ||
         write_status_ == WriteStatus::FINISHING) {
       write_status_ = WriteStatus::CANCELING;
     } else {
@@ -230,6 +232,11 @@ class ClientWriter {
     auto on_write = std::move(on_write_);
     auto on_writes_done = std::move(on_writes_done_);
     auto on_error = std::move(on_error_);
+    on_connect_ = nullptr;
+    on_finish_ = nullptr;
+    on_write_ = nullptr;
+    on_writes_done_ = nullptr;
+    on_error_ = nullptr;
 
     ++nesting_;
     lock.unlock();
@@ -287,8 +294,8 @@ class ClientWriter {
  private:
   template <class F, class... Args>
   void RunCallback(std::unique_lock<std::mutex>& lock, std::string funcname,
-                   F f, Args&&... args) {
-    detail::RunCallbackClient(lock, nesting_, std::move(funcname), std::move(f),
+                   F& f, Args&&... args) {
+    detail::RunCallbackClient(lock, nesting_, std::move(funcname), f,
                               std::forward<Args>(args)...);
   }
 
@@ -410,7 +417,8 @@ class ClientWriter {
     // 書き込みが成功したら次のキューを処理する
     HandleRequestQueue();
 
-    RunCallback(d.lock, "OnWrite", on_write_, std::move(req.request), req.id);
+    auto on_write = on_write_;
+    RunCallback(d.lock, "OnWrite", on_write, std::move(req.request), req.id);
   }
 
   void HandleRequestQueue() {

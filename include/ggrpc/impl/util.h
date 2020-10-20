@@ -51,7 +51,7 @@ struct NotifierThunk : Handler {
 
 template <class F, class... Args>
 void RunCallbackClient(std::unique_lock<std::mutex>& lock, int& nesting,
-                       std::string funcname, F f, Args&&... args) {
+                       std::string funcname, F& f, Args&&... args) {
   // 普通にコールバックするとデッドロックの可能性があるので
   // unlock してからコールバックする。
   // 再度ロックした時に状態が変わってる可能性があるので注意すること。

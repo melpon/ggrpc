@@ -143,7 +143,7 @@ class Alarm {
  private:
   template <class F, class... Args>
   void RunCallback(std::unique_lock<std::mutex>& lock, std::string funcname,
-                   F f, Args&&... args) {
+                   F& f, Args&&... args) {
     // 普通にコールバックするとデッドロックの可能性があるので
     // unlock してからコールバックする。
     // 再度ロックした時に状態が変わってる可能性があるので注意すること。
@@ -171,14 +171,13 @@ class Alarm {
 
     auto data = std::move(alarm_queue_.front());
     // タイムアウトかキャンセルかのコールバックを呼び出す
-    RunCallback(d.lock, "OnAlarm", std::move(data.alarm),
-                !(data.canceled || !ok));
+    RunCallback(d.lock, "OnAlarm", data.alarm, !(data.canceled || !ok));
     alarm_queue_.pop_front();
     // キューにあるアラームで、キャンセル済みのがあったらどんどんキャンセルしていく
     // クローズ済みだった場合は全てキャンセルする
     while (!alarm_queue_.empty() && (alarm_queue_.front().canceled || close_)) {
       data = std::move(alarm_queue_.front());
-      RunCallback(d.lock, "OnAlarm", std::move(data.alarm), false);
+      RunCallback(d.lock, "OnAlarm", data.alarm, false);
       alarm_queue_.pop_front();
     }
 

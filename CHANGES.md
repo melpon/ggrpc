@@ -11,6 +11,10 @@
 
 ## master
 
+- [ADD] `ClientResponseReader` にタイムアウトを実装
+- [FIX] CANCELING 中に Close すると間違った状態になるのを修正
+- [FIX] clang だとオブジェクトが正しく解放されないのを修正
+
 ## 0.4.0 (2020-06-21)
 
 - [CHANGE] ディレクトリ構成を変更して、`<ggrpc/ggrpc.h>` をインクルードして使うようにした
