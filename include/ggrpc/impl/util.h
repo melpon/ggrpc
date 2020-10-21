@@ -96,6 +96,7 @@ void RunCallbackServer(std::unique_lock<std::mutex>& lock, int& nesting,
 
   if (nesting == 0) {
     auto ctx = std::move(tmp_context);
+    tmp_context = nullptr;
     ++nesting;
     lock.unlock();
     ctx.reset();

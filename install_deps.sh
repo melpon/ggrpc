@@ -99,7 +99,7 @@ if [ $GRPC_CHANGED -eq 1 -o ! -e $INSTALL_DIR/grpc/lib/libgrpc++.a ]; then
     git submodule update -i --recursive
   popd
 
-  for buildtype in release tsan asan; do
+  for buildtype in release tsan asan debug; do
     case "$buildtype" in
       "release" )
         _POSTFIX=""
@@ -121,6 +121,12 @@ if [ $GRPC_CHANGED -eq 1 -o ! -e $INSTALL_DIR/grpc/lib/libgrpc++.a ]; then
           -DCMAKE_BUILD_TYPE=Debug \
           -DCMAKE_C_FLAGS="-fsanitize=address" \
           -DCMAKE_CXX_FLAGS="-fsanitize=address" \
+        "
+        ;;
+      "debug" )
+        _POSTFIX="-debug"
+        _OPTS="
+          -DCMAKE_BUILD_TYPE=Debug \
         "
         ;;
     esac

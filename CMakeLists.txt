@@ -4,17 +4,18 @@ set(_INSTALL_DIR "${CMAKE_CURRENT_SOURCE_DIR}/_install")
 
 if (ENABLE_TSAN)
   set(CMAKE_PREFIX_PATH "${_INSTALL_DIR}/grpc-tsan")
-  set(CMAKE_BUILD_TYPE Debug)
 endif()
 
 if (ENABLE_ASAN)
   set(CMAKE_PREFIX_PATH "${_INSTALL_DIR}/grpc-asan")
-  set(CMAKE_BUILD_TYPE Debug)
 endif()
 
 if (NOT ENABLE_TSAN AND NOT ENABLE_ASAN)
-  set(CMAKE_PREFIX_PATH "${_INSTALL_DIR}/grpc")
-  set(CMAKE_BUILD_TYPE Release)
+  if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+    set(CMAKE_PREFIX_PATH "${_INSTALL_DIR}/grpc-debug")
+  else()
+    set(CMAKE_PREFIX_PATH "${_INSTALL_DIR}/grpc")
+  endif()
 endif()
 
 project(ggrpc C CXX)

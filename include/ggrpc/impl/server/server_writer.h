@@ -167,14 +167,15 @@ class ServerWriterHandler {
     server_ = nullptr;
 
     // 読み書き中ならキャンセルする
-    // 書き込み中ならキャンセルする
-    if (write_status_ == WriteStatus::WRITING ||
+    if (write_status_ == WriteStatus::IDLE ||
+        write_status_ == WriteStatus::WRITING ||
         write_status_ == WriteStatus::FINISHING) {
       server_context_.TryCancel();
       alarm_.Cancel();
     }
 
-    if (write_status_ == WriteStatus::WRITING ||
+    if (write_status_ == WriteStatus::IDLE ||
+        write_status_ == WriteStatus::WRITING ||
         write_status_ == WriteStatus::FINISHING ||
         write_status_ == WriteStatus::CANCELING ||
         write_status_ == WriteStatus::LISTENING) {

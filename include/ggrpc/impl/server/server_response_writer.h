@@ -95,6 +95,8 @@ class ServerResponseWriterHandler {
           p->release_ &&
           p->status_ == ServerResponseWriterHandler<W, R>::Status::FINISHED &&
           p->nesting_ == 0;
+      SPDLOG_TRACE("[0x{}] del={}, release={}, status={}, nesting={}", (void*)p,
+                   del, p->release_, (int)p->status_, p->nesting_);
       lock.unlock();
       if (del) {
         delete p;
@@ -159,17 +161,22 @@ class ServerResponseWriterHandler {
   void DoClose(std::unique_lock<std::mutex>& lock) {
     server_ = nullptr;
 
+    SPDLOG_TRACE("[0x{}] DoClose: status={}", (void*)this, (int)status_);
+
     // Listen 中ならサーバのシャットダウンで終わるのでキャンセル状態にして待つだけ
     if (status_ == Status::LISTENING) {
       status_ = Status::CANCELING;
       return;
     }
 
+    if (status_ == Status::IDLE) {
+      server_context_.TryCancel();
+    }
+
     // 読み書き中ならキャンセルする
     if (status_ == Status::FINISHING) {
       server_context_.TryCancel();
       status_ = Status::CANCELING;
-      return;
     }
 
     if (status_ == Status::CANCELING) {
@@ -185,7 +192,10 @@ class ServerResponseWriterHandler {
       return;
     }
 
+    SPDLOG_TRACE("[0x{}] Done start", (void*)this);
+
     auto context = std::move(context_);
+    context_ = nullptr;
 
     ++nesting_;
     lock.unlock();
@@ -193,6 +203,8 @@ class ServerResponseWriterHandler {
     context.reset();
     lock.lock();
     --nesting_;
+
+    SPDLOG_TRACE("[0x{}] Done end", (void*)this);
   }
 
  private:
@@ -264,6 +276,7 @@ class ServerResponseWriterHandler {
 
     RunCallback(d.lock, "OnAccept", &ServerResponseWriterHandler::OnAccept,
                 std::move(request_));
+    SPDLOG_TRACE("OnAccept done: status={}", (int)status_);
   }
 
   void ProceedToWrite(bool ok) {

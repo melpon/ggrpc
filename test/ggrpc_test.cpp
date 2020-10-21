@@ -55,6 +55,7 @@ class TestSstreamHandler
   }
   void OnAccept(gg::SstreamRequest request) override {
     SPDLOG_TRACE("received SstreamRequest: {}", request.DebugString());
+    std::this_thread::sleep_for(std::chrono::seconds(1));
     gg::SstreamResponse resp;
     resp.set_value(request.value() * 1);
     Context()->Write(resp);
@@ -230,14 +231,14 @@ class TestClientManager {
 
 // Bidiクライアントの接続コールバック時にいろいろやってもちゃんと動くか
 void test_client_bidi_connect_callback() {
-  TestServer server;
-  server.Start("localhost:50051", 10);
-  std::this_thread::sleep_for(std::chrono::seconds(2));
-
   auto channel = grpc::CreateChannel("localhost:50051",
                                      grpc::InsecureChannelCredentials());
   TestClientManager cm(channel, 10);
   cm.Start();
+
+  TestServer server;
+  server.Start("localhost:50051", 10);
+  std::this_thread::sleep_for(std::chrono::seconds(2));
 
   {
     auto bidi = cm.CreateBidi();
@@ -309,10 +310,6 @@ void test_client_bidi_connect_callback() {
 }
 
 void test_client_unary() {
-  TestServer server;
-  server.Start("localhost:50051", 10);
-  std::this_thread::sleep_for(std::chrono::seconds(2));
-
   auto channel = grpc::CreateChannel("localhost:50051",
                                      grpc::InsecureChannelCredentials());
   TestClientManager cm(channel, 10);
@@ -320,35 +317,65 @@ void test_client_unary() {
 
   gg::UnaryRequest req;
 
+  // サーバを立てずにやると接続エラーになる
   {
     auto unary = cm.CreateUnary();
     req.set_value(100);
-    unary->SetOnFinish(
-        [unary](gg::UnaryResponse resp, grpc::Status) { unary->Close(); });
+    unary->SetOnFinish([unary](gg::UnaryResponse resp, grpc::Status status) {
+      ASSERT(status.error_code() == grpc::UNAVAILABLE);
+      unary->Close();
+    });
+    unary->SetOnError(
+        [unary](ggrpc::ClientResponseReaderError error) { ASSERT(false); });
     unary->Connect(req);
     unary.reset();
-    std::this_thread::sleep_for(std::chrono::seconds(2));
+    std::this_thread::sleep_for(std::chrono::seconds(1));
   }
 
-  {
-    auto unary = cm.CreateUnary();
-    req.set_value(100);
-    unary->SetOnFinish(
-        [unary](gg::UnaryResponse resp, grpc::Status) { unary->Close(); });
-    unary->Connect(req);
-    std::this_thread::sleep_for(std::chrono::milliseconds(500));
-  }
+  //TestServer server;
+  //server.Start("localhost:50051", 1);
+  //std::this_thread::sleep_for(std::chrono::seconds(2));
+
+  //{
+  //  auto unary = cm.CreateUnary();
+  //  req.set_value(100);
+  //  unary->SetOnFinish([unary](gg::UnaryResponse resp, grpc::Status status) {
+  //    ASSERT(status.ok());
+  //    ASSERT(resp.value() == 10000);
+  //    unary->Close();
+  //  });
+  //  unary->SetOnError(
+  //      [unary](ggrpc::ClientResponseReaderError error) { ASSERT(false); });
+  //  unary->Connect(req);
+  //  unary.reset();
+  //  std::this_thread::sleep_for(std::chrono::seconds(2));
+  //}
+
+  //{
+  //  auto unary = cm.CreateUnary();
+  //  req.set_value(100);
+  //  unary->SetOnFinish([unary](gg::UnaryResponse resp, grpc::Status status) {
+  //    ASSERT(status.error_code() == grpc::UNAVAILABLE);
+  //    unary->Close();
+  //  });
+  //  unary->SetOnError(
+  //      [unary](ggrpc::ClientResponseReaderError error) { ASSERT(false); });
+  //  unary->Connect(req);
+  //  // レスポンスには1秒程度掛かるので、500ミリ秒経って先に進むとリクエストがキャンセルされ、
+  //  // 各マネージャのデストラクタが呼ばれてエラーになる。
+  //  std::this_thread::sleep_for(std::chrono::milliseconds(500));
+  //}
 }
 
 void test_client_sstream() {
-  TestServer server;
-  server.Start("localhost:50051", 10);
-  std::this_thread::sleep_for(std::chrono::seconds(2));
-
   auto channel = grpc::CreateChannel("localhost:50051",
                                      grpc::InsecureChannelCredentials());
   TestClientManager cm(channel, 10);
   cm.Start();
+
+  TestServer server;
+  server.Start("localhost:50051", 10);
+  std::this_thread::sleep_for(std::chrono::seconds(2));
 
   gg::SstreamRequest req;
 
@@ -586,60 +613,15 @@ void test_client_generic() {
   }
 }
 
-void test_client_unary_timeout() {
-  TestServer server;
-  server.Start("localhost:50051", 10);
-  std::this_thread::sleep_for(std::chrono::seconds(1));
-
-  auto channel = grpc::CreateChannel("localhost:50051",
-                                     grpc::InsecureChannelCredentials());
-  TestClientManager cm(channel, 10);
-  cm.Start();
-
-  gg::UnaryRequest req;
-
-  {
-    auto unary = cm.CreateUnary();
-    req.set_value(100);
-    unary->SetTimeout(std::chrono::milliseconds(1500));
-    unary->SetOnFinish([unary](gg::UnaryResponse resp, grpc::Status status) {
-      ASSERT(status.ok());
-      ASSERT(resp.value() == 10000);
-    });
-    unary->SetOnError(
-        [unary](ggrpc::ClientResponseReaderError error) { ASSERT(false); });
-    unary->Connect(req);
-    unary.reset();
-    std::this_thread::sleep_for(std::chrono::seconds(2));
-  }
-
-  {
-    auto unary = cm.CreateUnary();
-    req.set_value(100);
-    unary->SetTimeout(std::chrono::milliseconds(100));
-    unary->SetOnFinish([unary](gg::UnaryResponse resp, grpc::Status status) {
-      ASSERT(false);
-    });
-    unary->SetOnError([unary](ggrpc::ClientResponseReaderError error) {
-      ASSERT(error == ggrpc::ClientResponseReaderError::TIMEOUT);
-      unary->Close();
-    });
-    unary->Connect(req);
-    unary.reset();
-    std::this_thread::sleep_for(std::chrono::seconds(2));
-  }
-}
-
 int main() {
   spdlog::set_level(spdlog::level::trace);
 
-  test_client_bidi_connect_callback();
+  //test_client_bidi_connect_callback();
   test_client_unary();
-  test_client_sstream();
-  test_client_cstream();
-  test_server();
-  test_client_alarm();
-  test_server_alarm();
-  test_client_generic();
-  test_client_unary_timeout();
+  //test_client_sstream();
+  //test_client_cstream();
+  //test_server();
+  //test_client_alarm();
+  //test_server_alarm();
+  //test_client_generic();
 }
