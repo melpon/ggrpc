@@ -179,11 +179,15 @@ class TestClientManager {
 
   ggrpc::ClientManager* ClientManager() { return &cm_; }
 
-  std::shared_ptr<UnaryClient> CreateUnary() {
+  std::shared_ptr<UnaryClient> CreateUnary(int milliseconds = 0) {
     return cm_.CreateResponseReader<gg::UnaryRequest, gg::UnaryResponse>(
-        [stub = stub_.get()](grpc::ClientContext* context,
-                             const gg::UnaryRequest& request,
-                             grpc::CompletionQueue* cq) {
+        [stub = stub_.get(), milliseconds](grpc::ClientContext* context,
+                                           const gg::UnaryRequest& request,
+                                           grpc::CompletionQueue* cq) {
+          if (milliseconds != 0) {
+            context->set_deadline(std::chrono::system_clock::now() +
+                                  std::chrono::milliseconds(milliseconds));
+          }
           return stub->AsyncUnary(context, request, cq);
         });
   }
@@ -613,6 +617,46 @@ void test_client_generic() {
   }
 }
 
+void test_client_timeout() {
+  auto channel = grpc::CreateChannel("localhost:50051",
+                                     grpc::InsecureChannelCredentials());
+  TestClientManager cm(channel, 10);
+  cm.Start();
+
+  TestServer server;
+  server.Start("localhost:50051", 10);
+  std::this_thread::sleep_for(std::chrono::seconds(2));
+
+  gg::UnaryRequest req;
+
+  {
+    auto unary = cm.CreateUnary(2000);
+    req.set_value(100);
+
+    unary->SetOnFinish([unary](gg::UnaryResponse resp, grpc::Status status) {
+      ASSERT(status.ok());
+      ASSERT(resp.value() == 10000);
+      unary->Close();
+    });
+    unary->Connect(std::move(req));
+    unary.reset();
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+  }
+
+  {
+    auto unary = cm.CreateUnary(100);
+    req.set_value(100);
+
+    unary->SetOnFinish([unary](gg::UnaryResponse resp, grpc::Status status) {
+      ASSERT(status.error_code() == grpc::DEADLINE_EXCEEDED);
+      unary->Close();
+    });
+    unary->Connect(std::move(req));
+    unary.reset();
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+  }
+}
+
 int main() {
   spdlog::set_level(spdlog::level::trace);
 
@@ -624,4 +668,5 @@ int main() {
   test_client_alarm();
   test_server_alarm();
   test_client_generic();
+  test_client_timeout();
 }
