@@ -75,6 +75,14 @@ class ServerWriterHandler {
   detail::NotifierThunk<ServerWriterHandler> notifier_thunk_;
   friend class detail::NotifierThunk<ServerWriterHandler>;
 
+  struct DoneThunk : Handler {
+    ServerWriterHandler* p;
+    DoneThunk(ServerWriterHandler* p) : p(p) {}
+    void Proceed(bool ok) override { p->ProceedToDone(ok); }
+  };
+  DoneThunk done_thunk_;
+  friend class DoneThunk;
+
   // 状態マシン
   enum class WriteStatus {
     LISTENING,
@@ -116,7 +124,8 @@ class ServerWriterHandler {
       : writer_(&server_context_),
         acceptor_thunk_(this),
         writer_thunk_(this),
-        notifier_thunk_(this) {}
+        notifier_thunk_(this),
+        done_thunk_(this) {}
   virtual ~ServerWriterHandler() {
     SPDLOG_TRACE("[0x{}] deleted ServerWriterHandler", (void*)this);
   }
@@ -132,6 +141,7 @@ class ServerWriterHandler {
     cq_ = cq;
     gen_handler_ = std::move(gen_handler);
     context_ = context;
+    server_context_.AsyncNotifyWhenDone(&done_thunk_);
     Request(&server_context_, &request_, &writer_, cq_, &acceptor_thunk_);
   }
   typedef W WriteType;
@@ -283,12 +293,12 @@ class ServerWriterHandler {
       return;
     }
 
+    write_status_ = WriteStatus::IDLE;
+
     // 次の要求に備える
     d.lock.unlock();
     gen_handler_(cq_);
     d.lock.lock();
-
-    write_status_ = WriteStatus::IDLE;
 
     RunCallback(d.lock, "OnAccept", &ServerWriterHandler::OnAccept,
                 std::move(request_));
@@ -381,6 +391,15 @@ class ServerWriterHandler {
     } else {
       // Finish
       writer_.Finish(data.status, &writer_thunk_);
+    }
+  }
+  void ProceedToDone(bool ok) {
+    SafeDeleter d(this);
+    SPDLOG_TRACE("[0x{}] ProceedToDone: ok={}, cancelled={}", (void*)this, ok,
+                 server_context_.IsCancelled());
+    if (write_status_ == WriteStatus::CANCELING) {
+      write_status_ = WriteStatus::FINISHED;
+      Done(d.lock);
     }
   }
 

@@ -274,15 +274,14 @@ class ServerReaderHandler {
       return;
     }
 
+    read_status_ = ReadStatus::READING;
+    write_status_ = WriteStatus::IDLE;
+    reader_.Read(&request_, &reader_thunk_);
+
     // 次の要求に備える
     d.lock.unlock();
     gen_handler_(cq_);
     d.lock.lock();
-
-    read_status_ = ReadStatus::READING;
-    reader_.Read(&request_, &reader_thunk_);
-
-    write_status_ = WriteStatus::IDLE;
 
     RunCallback(d.lock, "OnAccept", &ServerReaderHandler::OnAccept);
   }

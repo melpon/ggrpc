@@ -174,6 +174,9 @@ class ServerReaderWriterHandler {
   void DoClose(std::unique_lock<std::mutex>& lock) {
     server_ = nullptr;
 
+    SPDLOG_TRACE("[0x{}] DoClose: read_status={}, write_status={}, nesting={}",
+                 (void*)this, (int)read_status_, (int)write_status_, nesting_);
+
     // 読み書き中ならキャンセルする
     if (read_status_ == ReadStatus::READING ||
         write_status_ == WriteStatus::WRITING ||
@@ -211,7 +214,10 @@ class ServerReaderWriterHandler {
       return;
     }
 
+    //SPDLOG_TRACE("[0x{}] Done start", (void*)this);
+
     auto context = std::move(context_);
+    context_ = nullptr;
 
     ++nesting_;
     lock.unlock();
@@ -219,6 +225,8 @@ class ServerReaderWriterHandler {
     context.reset();
     lock.lock();
     --nesting_;
+
+    //SPDLOG_TRACE("[0x{}] Done end", (void*)this);
   }
 
  private:
@@ -282,7 +290,9 @@ class ServerReaderWriterHandler {
   void ProceedToAccept(bool ok) {
     SafeDeleter d(this);
 
-    SPDLOG_TRACE("[0x{}] ProceedToAccept: ok={}", (void*)this, ok);
+    SPDLOG_TRACE(
+        "[0x{}] ProceedToAccept: ok={}, read_status={}, write_status={}",
+        (void*)this, ok, (int)read_status_, (int)write_status_);
 
     assert(read_status_ == ReadStatus::LISTENING &&
                write_status_ == WriteStatus::LISTENING ||
@@ -307,15 +317,21 @@ class ServerReaderWriterHandler {
       return;
     }
 
+    read_status_ = ReadStatus::READING;
+    write_status_ = WriteStatus::IDLE;
+
+    streamer_.Read(&request_, &reader_thunk_);
+
+    //SPDLOG_TRACE("[0x{}] start gen_handler: read_status={}, write_status={}",
+    //             (void*)this, (int)read_status_, (int)write_status_);
+
     // 次の要求に備える
     d.lock.unlock();
     gen_handler_(cq_);
     d.lock.lock();
 
-    read_status_ = ReadStatus::READING;
-    write_status_ = WriteStatus::IDLE;
-
-    streamer_.Read(&request_, &reader_thunk_);
+    //SPDLOG_TRACE("[0x{}] end gen_handler: read_status={}, write_status={}",
+    //             (void*)this, (int)read_status_, (int)write_status_);
 
     RunCallback(d.lock, "OnAccept", &ServerReaderWriterHandler::OnAccept);
   }

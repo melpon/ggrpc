@@ -196,7 +196,7 @@ class TestClientManager {
               "/gg.Test/Unary", grpc::internal::RpcMethod::NORMAL_RPC, channel);
           return std::unique_ptr<
               grpc::ClientAsyncResponseReader<grpc::ByteBuffer>>(
-              grpc_impl::internal::ClientAsyncResponseReaderFactory<
+              grpc::internal::ClientAsyncResponseReaderFactory<
                   grpc::ByteBuffer>::Create(channel.get(), cq, method, context,
                                             request, true));
         });
@@ -299,7 +299,7 @@ void test_client_bidi_connect_callback() {
     auto bidi = cm.CreateBidi();
     bidi->SetOnConnect([bidi]() { bidi->WritesDone(); });
     bidi->Connect();
-    std::this_thread::sleep_for(std::chrono::seconds(1));
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
   }
 
   {
@@ -332,39 +332,39 @@ void test_client_unary() {
     std::this_thread::sleep_for(std::chrono::seconds(1));
   }
 
-  //TestServer server;
-  //server.Start("localhost:50051", 1);
-  //std::this_thread::sleep_for(std::chrono::seconds(2));
+  TestServer server;
+  server.Start("localhost:50051", 10);
+  std::this_thread::sleep_for(std::chrono::seconds(2));
 
-  //{
-  //  auto unary = cm.CreateUnary();
-  //  req.set_value(100);
-  //  unary->SetOnFinish([unary](gg::UnaryResponse resp, grpc::Status status) {
-  //    ASSERT(status.ok());
-  //    ASSERT(resp.value() == 10000);
-  //    unary->Close();
-  //  });
-  //  unary->SetOnError(
-  //      [unary](ggrpc::ClientResponseReaderError error) { ASSERT(false); });
-  //  unary->Connect(req);
-  //  unary.reset();
-  //  std::this_thread::sleep_for(std::chrono::seconds(2));
-  //}
+  {
+    auto unary = cm.CreateUnary();
+    req.set_value(100);
+    unary->SetOnFinish([unary](gg::UnaryResponse resp, grpc::Status status) {
+      ASSERT(status.ok());
+      ASSERT(resp.value() == 10000);
+      unary->Close();
+    });
+    unary->SetOnError(
+        [unary](ggrpc::ClientResponseReaderError error) { ASSERT(false); });
+    unary->Connect(req);
+    unary.reset();
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+  }
 
-  //{
-  //  auto unary = cm.CreateUnary();
-  //  req.set_value(100);
-  //  unary->SetOnFinish([unary](gg::UnaryResponse resp, grpc::Status status) {
-  //    ASSERT(status.error_code() == grpc::UNAVAILABLE);
-  //    unary->Close();
-  //  });
-  //  unary->SetOnError(
-  //      [unary](ggrpc::ClientResponseReaderError error) { ASSERT(false); });
-  //  unary->Connect(req);
-  //  // レスポンスには1秒程度掛かるので、500ミリ秒経って先に進むとリクエストがキャンセルされ、
-  //  // 各マネージャのデストラクタが呼ばれてエラーになる。
-  //  std::this_thread::sleep_for(std::chrono::milliseconds(500));
-  //}
+  {
+    auto unary = cm.CreateUnary();
+    req.set_value(100);
+    unary->SetOnFinish([unary](gg::UnaryResponse resp, grpc::Status status) {
+      ASSERT(status.error_code() == grpc::CANCELLED);
+      unary->Close();
+    });
+    unary->SetOnError(
+        [unary](ggrpc::ClientResponseReaderError error) { ASSERT(false); });
+    unary->Connect(req);
+    // レスポンスには1秒程度掛かるので、500ミリ秒経って先に進むと
+    // 各マネージャのデストラクタが呼ばれてリクエストがキャンセルされる。
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+  }
 }
 
 void test_client_sstream() {
@@ -616,12 +616,12 @@ void test_client_generic() {
 int main() {
   spdlog::set_level(spdlog::level::trace);
 
-  //test_client_bidi_connect_callback();
+  test_client_bidi_connect_callback();
   test_client_unary();
-  //test_client_sstream();
-  //test_client_cstream();
-  //test_server();
-  //test_client_alarm();
-  //test_server_alarm();
-  //test_client_generic();
+  test_client_sstream();
+  test_client_cstream();
+  test_server();
+  test_client_alarm();
+  test_server_alarm();
+  test_client_generic();
 }

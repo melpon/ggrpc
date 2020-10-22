@@ -73,6 +73,14 @@ class ServerResponseWriterHandler {
   detail::NotifierThunk<ServerResponseWriterHandler> notifier_thunk_;
   friend class detail::NotifierThunk<ServerResponseWriterHandler>;
 
+  struct DoneThunk : Handler {
+    ServerResponseWriterHandler* p;
+    DoneThunk(ServerResponseWriterHandler* p) : p(p) {}
+    void Proceed(bool ok) override { p->ProceedToDone(ok); }
+  };
+  DoneThunk done_thunk_;
+  friend class DoneThunk;
+
   // 状態マシン
   enum class Status { LISTENING, IDLE, FINISHING, CANCELING, FINISHED };
   Status status_ = Status::LISTENING;
@@ -95,8 +103,8 @@ class ServerResponseWriterHandler {
           p->release_ &&
           p->status_ == ServerResponseWriterHandler<W, R>::Status::FINISHED &&
           p->nesting_ == 0;
-      SPDLOG_TRACE("[0x{}] del={}, release={}, status={}, nesting={}", (void*)p,
-                   del, p->release_, (int)p->status_, p->nesting_);
+      //SPDLOG_TRACE("[0x{}] del={}, release={}, status={}, nesting={}", (void*)p,
+      //             del, p->release_, (int)p->status_, p->nesting_);
       lock.unlock();
       if (del) {
         delete p;
@@ -109,7 +117,8 @@ class ServerResponseWriterHandler {
       : response_writer_(&server_context_),
         acceptor_thunk_(this),
         writer_thunk_(this),
-        notifier_thunk_(this) {}
+        notifier_thunk_(this),
+        done_thunk_(this) {}
 
   virtual ~ServerResponseWriterHandler() {
     SPDLOG_TRACE("[0x{}] delete ServerResponseWriterHandler", (void*)this);
@@ -126,6 +135,7 @@ class ServerResponseWriterHandler {
     cq_ = cq;
     gen_handler_ = std::move(gen_handler);
     context_ = context;
+    server_context_.AsyncNotifyWhenDone(&done_thunk_);
     Request(&server_context_, &request_, &response_writer_, cq_,
             &acceptor_thunk_);
   }
@@ -161,7 +171,7 @@ class ServerResponseWriterHandler {
   void DoClose(std::unique_lock<std::mutex>& lock) {
     server_ = nullptr;
 
-    SPDLOG_TRACE("[0x{}] DoClose: status={}", (void*)this, (int)status_);
+    //SPDLOG_TRACE("[0x{}] DoClose: status={}", (void*)this, (int)status_);
 
     // Listen 中ならサーバのシャットダウンで終わるのでキャンセル状態にして待つだけ
     if (status_ == Status::LISTENING) {
@@ -171,12 +181,15 @@ class ServerResponseWriterHandler {
 
     if (status_ == Status::IDLE) {
       server_context_.TryCancel();
+      status_ = Status::CANCELING;
+      return;
     }
 
     // 読み書き中ならキャンセルする
     if (status_ == Status::FINISHING) {
       server_context_.TryCancel();
       status_ = Status::CANCELING;
+      return;
     }
 
     if (status_ == Status::CANCELING) {
@@ -192,7 +205,7 @@ class ServerResponseWriterHandler {
       return;
     }
 
-    SPDLOG_TRACE("[0x{}] Done start", (void*)this);
+    //SPDLOG_TRACE("[0x{}] Done start", (void*)this);
 
     auto context = std::move(context_);
     context_ = nullptr;
@@ -204,7 +217,7 @@ class ServerResponseWriterHandler {
     lock.lock();
     --nesting_;
 
-    SPDLOG_TRACE("[0x{}] Done end", (void*)this);
+    //SPDLOG_TRACE("[0x{}] Done end", (void*)this);
   }
 
  private:
@@ -267,16 +280,16 @@ class ServerResponseWriterHandler {
       return;
     }
 
+    status_ = Status::IDLE;
+
     // 次の要求に備える
     d.lock.unlock();
     gen_handler_(cq_);
     d.lock.lock();
 
-    status_ = Status::IDLE;
-
     RunCallback(d.lock, "OnAccept", &ServerResponseWriterHandler::OnAccept,
                 std::move(request_));
-    SPDLOG_TRACE("OnAccept done: status={}", (int)status_);
+    //SPDLOG_TRACE("OnAccept done: status={}", (int)status_);
   }
 
   void ProceedToWrite(bool ok) {
@@ -336,6 +349,16 @@ class ServerResponseWriterHandler {
                               &writer_thunk_);
     } else {
       response_writer_.FinishWithError(response_.status, &writer_thunk_);
+    }
+  }
+
+  void ProceedToDone(bool ok) {
+    SafeDeleter d(this);
+    SPDLOG_TRACE("[0x{}] ProceedToDone: ok={}, cancelled={}", (void*)this, ok,
+                 server_context_.IsCancelled());
+    if (status_ == Status::CANCELING) {
+      status_ = Status::FINISHED;
+      Done(d.lock);
     }
   }
 
