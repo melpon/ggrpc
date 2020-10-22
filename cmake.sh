@@ -24,7 +24,9 @@ while [ $# -ne 0 ]; do
       ENABLE_ASAN=ON
       CMAKE_BUILD_TYPE=Debug
       BUILD_DIR="${BUILD_DIR}-asan"
-      export ASAN_OPTIONS=detect_leaks=1
+      if [ "`uname`" != "Darwin" ]; then
+        export ASAN_OPTIONS=detect_leaks=1
+      fi
       ;;
     "--debug" )
       CMAKE_BUILD_TYPE=Debug
