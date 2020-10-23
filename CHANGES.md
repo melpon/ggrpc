@@ -11,6 +11,9 @@
 
 ## master
 
+- [ADD] `ClientManager::NotifyOnStateChange` を実装
+- [ADD] やっぱりタイムアウト必要だったので復活
+
 ## 0.5.1 (2020-10-22)
 
 - [CHANGE] タイムアウトは deadline で代用可能だったので削除

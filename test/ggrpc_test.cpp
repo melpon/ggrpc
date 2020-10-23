@@ -657,6 +657,127 @@ void test_client_timeout() {
   }
 }
 
+void test_client_timeout2() {
+  auto channel = grpc::CreateChannel("localhost:50051",
+                                     grpc::InsecureChannelCredentials());
+  TestClientManager cm(channel, 10);
+  cm.Start();
+
+  TestServer server;
+  server.Start("localhost:50051", 10);
+  std::this_thread::sleep_for(std::chrono::seconds(2));
+
+  gg::UnaryRequest req;
+
+  {
+    auto unary = cm.CreateUnary();
+    req.set_value(100);
+
+    unary->SetTimeout(std::chrono::seconds(2));
+    unary->SetOnFinish([unary](gg::UnaryResponse resp, grpc::Status status) {
+      ASSERT(status.ok());
+      ASSERT(resp.value() == 10000);
+      unary->Close();
+    });
+    unary->Connect(std::move(req));
+    unary.reset();
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+  }
+
+  {
+    auto unary = cm.CreateUnary();
+    req.set_value(100);
+
+    unary->SetTimeout(std::chrono::milliseconds(500));
+    unary->SetOnError([unary](ggrpc::ClientResponseReaderError error) {
+      ASSERT(error == ggrpc::ClientResponseReaderError::TIMEOUT);
+    });
+    unary->SetOnFinish([unary](gg::UnaryResponse resp, grpc::Status status) {
+      ASSERT(false);
+    });
+    unary->Connect(std::move(req));
+    unary.reset();
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+  }
+}
+
+void test_client_notify() {
+  auto channel = grpc::CreateChannel("localhost:50051",
+                                     grpc::InsecureChannelCredentials());
+  TestClientManager cm(channel, 10);
+  cm.Start();
+
+  TestServer server;
+  server.Start("localhost:50051", 10);
+  std::this_thread::sleep_for(std::chrono::seconds(2));
+
+  gg::UnaryRequest req;
+
+  {
+    auto unary = cm.CreateUnary();
+    req.set_value(100);
+
+    std::atomic<int> n = 0;
+    auto deadline =
+        std::chrono::system_clock::now() + std::chrono::milliseconds(100);
+    auto on_notify = [&n](grpc::Channel* channel,
+                          std::chrono::system_clock::time_point deadline,
+                          std::shared_ptr<UnaryClient> unary, bool& repeated) {
+      bool expired = std::chrono::system_clock::now() > deadline;
+      SPDLOG_TRACE("OnStateChange: state={}, expired={}",
+                   (int)channel->GetState(false), expired);
+      if (!expired) {
+        repeated = true;
+        return;
+      }
+      n += 1;
+    };
+    cm.ClientManager()->NotifyOnStateChange<UnaryClient>(
+        channel.get(), deadline, unary, on_notify);
+    deadline += std::chrono::milliseconds(100);
+    cm.ClientManager()->NotifyOnStateChange<UnaryClient>(
+        channel.get(), deadline, unary, on_notify);
+    deadline += std::chrono::milliseconds(100);
+    cm.ClientManager()->NotifyOnStateChange<UnaryClient>(
+        channel.get(), deadline, unary, on_notify);
+
+    unary->SetOnFinish([unary](gg::UnaryResponse resp, grpc::Status status) {
+    });
+    unary->Connect(std::move(req));
+    unary.reset();
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+    ASSERT(n == 3);
+  }
+
+  {
+    auto unary = cm.CreateUnary();
+    req.set_value(100);
+
+    auto deadline =
+        std::chrono::system_clock::now() + std::chrono::milliseconds(500);
+    auto on_notify = [](grpc::Channel* channel,
+                        std::chrono::system_clock::time_point deadline,
+                        std::shared_ptr<UnaryClient> unary, bool& repeated) {
+      bool expired = std::chrono::system_clock::now() > deadline;
+      SPDLOG_TRACE("OnStateChange: state={}, expired={}",
+                   (int)channel->GetState(false), expired);
+      if (!expired) {
+        repeated = true;
+        return;
+      }
+      unary->Close();
+    };
+    cm.ClientManager()->NotifyOnStateChange<UnaryClient>(
+        channel.get(), deadline, unary, on_notify);
+    unary->SetOnFinish([unary](gg::UnaryResponse resp, grpc::Status status) {
+      ASSERT(false);
+    });
+    unary->Connect(std::move(req));
+    unary.reset();
+    std::this_thread::sleep_for(std::chrono::seconds(2));
+  }
+}
+
 int main() {
   spdlog::set_level(spdlog::level::trace);
 
@@ -669,4 +790,6 @@ int main() {
   test_server_alarm();
   test_client_generic();
   test_client_timeout();
+  test_client_timeout2();
+  test_client_notify();
 }
