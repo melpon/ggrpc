@@ -11,6 +11,8 @@
 
 ## master
 
+- [ADD] `grpc::ClientContext` を取得する関数を追加
+
 ## 0.5.2 (2020-10-23)
 
 - [ADD] `ClientManager::NotifyOnStateChange` を実装

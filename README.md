@@ -171,6 +171,9 @@ class ClientResponseReader {
   typedef std::function<void(R, grpc::Status)> OnFinishFunc;
   typedef std::function<void(ClientResponseWriterError)> OnErrorFunc;
 
+  grpc::ClientContext* GetGrpcContext() { return &context_; }
+  const grpc::ClientContext* GetGrpcContext() const { return &context_; }
+
   void SetOnFinish(OnFinishFunc on_finish);
   void SetOnError(OnErrorFunc on_error);
   void SetTimeout(std::chrono::milliseconds timeout);
@@ -196,6 +199,9 @@ class ClientReader {
   typedef std::function<void(R)> OnReadFunc;
   typedef std::function<void(grpc::Status)> OnFinishFunc;
   typedef std::function<void(ClientReaderError)> OnErrorFunc;
+
+  grpc::ClientContext* GetGrpcContext() { return &context_; }
+  const grpc::ClientContext* GetGrpcContext() const { return &context_; }
 
   void SetOnConnect(OnConnectFunc on_connect);
   void SetOnRead(OnReadFunc on_read);
@@ -225,6 +231,9 @@ class ClientWriter {
   typedef std::function<void(ClientWriterError)> OnErrorFunc;
   typedef std::function<void(W, int64_t)> OnWriteFunc;
   typedef std::function<void()> OnWritesDoneFunc;
+
+  grpc::ClientContext* GetGrpcContext() { return &context_; }
+  const grpc::ClientContext* GetGrpcContext() const { return &context_; }
 
   void SetOnConnect(OnConnectFunc on_connect);
   void SetOnFinish(OnFinishFunc on_finish);
@@ -259,6 +268,9 @@ class ClientReaderWriter {
   typedef std::function<void(ClientReaderWriterError)> OnErrorFunc;
   typedef std::function<void(W, int64_t)> OnWriteFunc;
   typedef std::function<void()> OnWritesDoneFunc;
+
+  grpc::ClientContext* GetGrpcContext() { return &context_; }
+  const grpc::ClientContext* GetGrpcContext() const { return &context_; }
 
   void SetOnConnect(OnConnectFunc on_connect);
   void SetOnRead(OnReadFunc on_read);
@@ -299,6 +311,17 @@ public:
       typename ClientReaderWriter<W, R>::ConnectFunc connect);
 
   std::shared_ptr<Alarm> CreateAlarm();
+
+  template <class T>
+  using OnStateChangeFunc =
+      std::function<void(grpc::Channel*, std::chrono::system_clock::time_point,
+                         std::shared_ptr<T>, bool&)>;
+
+  template <class T>
+  void NotifyOnStateChange(grpc::Channel* channel,
+                           std::chrono::system_clock::time_point deadline,
+                           std::shared_ptr<T> target,
+                           OnStateChangeFunc<T> on_notify);
 };
 
 }

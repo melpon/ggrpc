@@ -102,6 +102,10 @@ class ClientReader {
   ClientReader& operator=(ClientReader&&) = delete;
 
  public:
+  // コールバック呼び出し中のみ利用可能
+  grpc::ClientContext* GetGrpcContext() { return &context_; }
+  const grpc::ClientContext* GetGrpcContext() const { return &context_; }
+
   void SetOnConnect(OnConnectFunc on_connect) {
     std::lock_guard<std::mutex> guard(mutex_);
     if (read_status_ != ReadStatus::INIT) {

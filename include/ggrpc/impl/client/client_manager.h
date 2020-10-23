@@ -187,23 +187,6 @@ class ClientManager {
                          std::shared_ptr<T>, bool&)>;
 
   template <class T>
-  struct NotifyData : Handler {
-    ClientManager* cm;
-    grpc::Channel* channel;
-    std::chrono::system_clock::time_point deadline;
-    void* p;
-    OnStateChangeFunc<T> on_notify;
-    NotifyData(ClientManager* cm, grpc::Channel* channel,
-               std::chrono::system_clock::time_point deadline, void* p,
-               OnStateChangeFunc<T> on_notify)
-        : cm(cm),
-          channel(channel),
-          deadline(deadline),
-          p(p),
-          on_notify(std::move(on_notify)) {}
-    void Proceed(bool ok) override { cm->ProceedToNotify<T>(ok, this); }
-  };
-  template <class T>
   void NotifyOnStateChange(grpc::Channel* channel,
                            std::chrono::system_clock::time_point deadline,
                            std::shared_ptr<T> target,
@@ -220,33 +203,6 @@ class ClientManager {
         channel->GetState(false), deadline, cq,
         new NotifyData<T>(this, channel, deadline, target.get(),
                           std::move(on_notify)));
-  }
-  template <class T>
-  void ProceedToNotify(bool ok, NotifyData<T>* p) {
-    std::lock_guard<std::mutex> guard(mutex_);
-
-    struct SafeDelete {
-      NotifyData<T>* p;
-      ~SafeDelete() { delete p; }
-    } safe_delete = {p};
-
-    auto it = holders_map_.find(p->p);
-    if (it == holders_map_.end()) {
-      return;
-    }
-    auto sp = std::static_pointer_cast<T>(it->second->Lock());
-    if (sp == nullptr) {
-      return;
-    }
-    bool repeated = false;
-    p->on_notify(p->channel, p->deadline, sp, repeated);
-    if (repeated) {
-      auto client_id = next_client_id_++;
-      auto cq = &threads_[client_id % threads_.size()].cq;
-      p->channel->NotifyOnStateChange(p->channel->GetState(false), p->deadline,
-                                      cq, p);
-      safe_delete.p = nullptr;
-    }
   }
 
   template <class W, class R>
@@ -275,9 +231,7 @@ class ClientManager {
         std::move(connect));
   }
 
-  std::shared_ptr<Alarm> CreateAlarm() {
-    return Create<Alarm, AlarmHolder>();
-  }
+  std::shared_ptr<Alarm> CreateAlarm() { return Create<Alarm, AlarmHolder>(); }
 
  private:
   template <class T, class H, class... Args>
@@ -296,6 +250,53 @@ class ClientManager {
     holders_.push_back(std::move(holder));
     return p;
   }
+
+  template <class T>
+  struct NotifyData : Handler {
+    ClientManager* cm;
+    grpc::Channel* channel;
+    std::chrono::system_clock::time_point deadline;
+    void* p;
+    OnStateChangeFunc<T> on_notify;
+    NotifyData(ClientManager* cm, grpc::Channel* channel,
+               std::chrono::system_clock::time_point deadline, void* p,
+               OnStateChangeFunc<T> on_notify)
+        : cm(cm),
+          channel(channel),
+          deadline(deadline),
+          p(p),
+          on_notify(std::move(on_notify)) {}
+    void Proceed(bool ok) override { cm->ProceedToNotify<T>(ok, this); }
+  };
+
+  template <class T>
+  void ProceedToNotify(bool ok, NotifyData<T>* p) {
+    std::lock_guard<std::mutex> guard(mutex_);
+
+    struct SafeDelete {
+      NotifyData<T>* p;
+      ~SafeDelete() { delete p; }
+    } safe_delete = {p};
+
+    auto it = holders_map_.find(p->p);
+    if (it == holders_map_.end()) {
+      return;
+    }
+    auto sp = std::static_pointer_cast<T>(it->second->Lock());
+    if (sp == nullptr) {
+      return;
+    }
+    bool repeated = false;
+    p->on_notify(p->channel, p->deadline, sp, repeated);
+    if (repeated) {
+      auto client_id = next_client_id_++;
+      auto cq = &threads_[client_id % threads_.size()].cq;
+      p->channel->NotifyOnStateChange(p->channel->GetState(false), p->deadline,
+                                      cq, p);
+      safe_delete.p = nullptr;
+    }
+  }
+
 };
 
 }  // namespace ggrpc
