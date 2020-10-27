@@ -56,17 +56,19 @@ void RunCallbackClient(std::unique_lock<std::mutex>& lock, int& nesting,
   // unlock してからコールバックする。
   // 再度ロックした時に状態が変わってる可能性があるので注意すること。
   if (f) {
+    auto cf = std::move(f);
+    f = nullptr;
     ++nesting;
     lock.unlock();
     try {
       SPDLOG_TRACE("call {}", funcname);
-      f(std::forward<Args>(args)...);
+      cf(std::forward<Args>(args)...);
     } catch (std::exception& e) {
       SPDLOG_ERROR("{} error: what={}", funcname, e.what());
     } catch (...) {
       SPDLOG_ERROR("{} error", funcname);
     }
-    f = nullptr;
+    cf = nullptr;
     lock.lock();
     --nesting;
   }

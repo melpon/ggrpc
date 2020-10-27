@@ -39,9 +39,6 @@ class ClientResponseReader {
   detail::ReaderThunk<ClientResponseReader> reader_thunk_;
   friend class detail::ReaderThunk<ClientResponseReader>;
 
-  detail::NotifierThunk<ClientResponseReader> notifier_thunk_;
-  friend class detail::NotifierThunk<ClientResponseReader>;
-
   grpc::ClientContext context_;
   std::unique_ptr<grpc::ClientAsyncResponseReader<R>> reader_;
 
@@ -60,10 +57,6 @@ class ClientResponseReader {
   OnFinishFunc on_finish_;
   OnErrorFunc on_error_;
 
-  grpc::Alarm timeout_alarm_;
-  bool timeout_alarm_set_ = false;
-  std::chrono::milliseconds timeout_ = std::chrono::milliseconds::zero();
-
   struct SafeDeleter {
     ClientResponseReader* p;
     std::unique_lock<std::mutex> lock;
@@ -71,9 +64,9 @@ class ClientResponseReader {
     ~SafeDeleter() {
       bool del = p->release_ &&
                  p->status_ == ClientResponseReader::Status::DONE &&
-                 p->timeout_alarm_set_ == false && p->nesting_ == 0;
-      //SPDLOG_TRACE("del={}, release={}, status={}, timeout={}, nesting={}", del,
-      //             p->release_, (int)p->status_, p->timeout_alarm_set_, p->nesting_);
+                 p->nesting_ == 0;
+      //SPDLOG_TRACE("del={}, release={}, status={}, nesting={}", del,
+      //             p->release_, (int)p->status_, p->nesting_);
       lock.unlock();
       if (del) {
         delete p;
@@ -84,7 +77,6 @@ class ClientResponseReader {
 
   ClientResponseReader(grpc::CompletionQueue* cq, ConnectFunc connect)
       : reader_thunk_(this),
-        notifier_thunk_(this),
         cq_(cq),
         connect_(std::move(connect)) {}
   ~ClientResponseReader() {
@@ -116,13 +108,6 @@ class ClientResponseReader {
     }
     on_error_ = std::move(on_error);
   }
-  void SetTimeout(std::chrono::milliseconds timeout) {
-    std::lock_guard<std::mutex> guard(mutex_);
-    if (status_ == Status::DONE) {
-      return;
-    }
-    timeout_ = timeout;
-  }
 
   void Connect(const W& connect) {
     std::lock_guard<std::mutex> guard(mutex_);
@@ -133,12 +118,6 @@ class ClientResponseReader {
 
     reader_ = connect_(&context_, connect, cq_);
     reader_->Finish(&response_, &grpc_status_, &reader_thunk_);
-
-    if (timeout_ != std::chrono::milliseconds::zero()) {
-      auto timepoint = std::chrono::system_clock::now() + timeout_;
-      timeout_alarm_.Set(cq_, timepoint, &notifier_thunk_);
-      timeout_alarm_set_ = true;
-    }
   }
 
  private:
@@ -179,6 +158,8 @@ class ClientResponseReader {
       return;
     }
 
+    //SPDLOG_TRACE("[0x{}] Done start: nesting={}", (void*)this, nesting_);
+
     auto on_finish = std::move(on_finish_);
     auto on_error = std::move(on_error_);
     on_finish_ = nullptr;
@@ -190,6 +171,8 @@ class ClientResponseReader {
     on_error = nullptr;
     lock.lock();
     --nesting_;
+
+    //SPDLOG_TRACE("[0x{}] Done end: nesting={}", (void*)this, nesting_);
   }
 
  private:
@@ -211,8 +194,6 @@ class ClientResponseReader {
     auto st = status_;
     status_ = Status::DONE;
 
-    timeout_alarm_.Cancel();
-
     if (!ok) {
       SPDLOG_ERROR("finishing error");
       if (st == Status::CONNECTING) {
@@ -227,29 +208,6 @@ class ClientResponseReader {
     if (st == Status::CONNECTING) {
       RunCallback(d.lock, "OnFinish", on_finish_, std::move(response_),
                   std::move(grpc_status_));
-    }
-    Done(d.lock);
-  }
-  void ProceedToNotify(bool ok) {
-    SafeDeleter d(this);
-    SPDLOG_TRACE("[0x{}] ProceedToNotify: ok={} status={}", (void*)this, ok,
-                 (int)status_);
-
-    assert(status_ == Status::CONNECTING || status_ == Status::CANCELING ||
-           status_ == Status::DONE);
-
-    timeout_alarm_set_ = false;
-
-    if (!ok) {
-      Done(d.lock);
-      return;
-    }
-
-    if (status_ == Status::CONNECTING) {
-      context_.TryCancel();
-      status_ = Status::CANCELING;
-      RunCallback(d.lock, "OnError", on_error_,
-                  ClientResponseReaderError::TIMEOUT);
     }
     Done(d.lock);
   }

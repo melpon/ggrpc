@@ -354,8 +354,8 @@ class ServerResponseWriterHandler {
 
   void ProceedToDone(bool ok) {
     SafeDeleter d(this);
-    SPDLOG_TRACE("[0x{}] ProceedToDone: ok={}, cancelled={}", (void*)this, ok,
-                 server_context_.IsCancelled());
+    SPDLOG_TRACE("[0x{}] ProceedToDone: ok={}, cancelled={}, status={}",
+                 (void*)this, ok, server_context_.IsCancelled(), (int)status_);
     if (status_ == Status::CANCELING) {
       status_ = Status::FINISHED;
       Done(d.lock);

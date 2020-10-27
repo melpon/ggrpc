@@ -11,6 +11,10 @@
 
 ## master
 
+- [CHANGE] やっぱりタイムアウトは不要だったので削除
+- [CHANGE] `ClientManager::NotifyOnStateChange` をクライアントに紐付けるのをやめる
+- [FIX] クライアントがリリースモードで落ちることがあったのを修正
+
 ## 0.5.3 (2020-10-23)
 
 - [ADD] `grpc::ClientContext` を取得する関数を追加

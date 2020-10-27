@@ -98,7 +98,6 @@ class ClientManager {
     std::shared_ptr<void> Lock() override { return LockWP(wp); }
   };
   std::vector<std::unique_ptr<Holder>> holders_;
-  std::map<void*, Holder*> holders_map_;
 
  public:
   ClientManager(int threads) : threads_(threads) {}
@@ -129,21 +128,6 @@ class ClientManager {
                                     return holder->Expired();
                                   }),
                    holders_.end());
-    for (const auto& holder : holders_) {
-      auto it = holders_map_.find(holder->Lock().get());
-      if (it == holders_map_.end()) {
-        continue;
-      }
-      it->second = nullptr;
-    }
-    auto it = holders_map_.begin();
-    while (it != holders_map_.end()) {
-      if (it->second == nullptr) {
-        it = holders_map_.erase(it);
-      } else {
-        ++it;
-      }
-    }
   }
 
  public:
@@ -161,7 +145,6 @@ class ClientManager {
       holder->Close();
     }
     holders_.clear();
-    holders_map_.clear();
 
     SPDLOG_TRACE("ClientManager::Shutdown all client closed");
 
@@ -181,28 +164,20 @@ class ClientManager {
     SPDLOG_TRACE("ClientManager::Shutdown finished");
   }
 
-  template <class T>
-  using OnStateChangeFunc =
-      std::function<void(grpc::Channel*, std::chrono::system_clock::time_point,
-                         std::shared_ptr<T>, bool&)>;
+  using OnStateChangeFunc = std::function<void(
+      grpc::Channel*, bool ok, std::chrono::system_clock::time_point&,
+      bool& repeated)>;
 
-  template <class T>
   void NotifyOnStateChange(grpc::Channel* channel,
                            std::chrono::system_clock::time_point deadline,
-                           std::shared_ptr<T> target,
-                           OnStateChangeFunc<T> on_notify) {
+                           OnStateChangeFunc on_notify) {
     std::lock_guard<std::mutex> guard(mutex_);
 
-    auto it = holders_map_.find(target.get());
-    if (it == holders_map_.end()) {
-      return;
-    }
     auto client_id = next_client_id_++;
     auto cq = &threads_[client_id % threads_.size()].cq;
     channel->NotifyOnStateChange(
         channel->GetState(false), deadline, cq,
-        new NotifyData<T>(this, channel, deadline, target.get(),
-                          std::move(on_notify)));
+        new NotifyData(this, channel, deadline, cq, std::move(on_notify)));
   }
 
   template <class W, class R>
@@ -246,53 +221,57 @@ class ClientManager {
     std::shared_ptr<T> p(new T(cq, std::forward<Args>(args)...),
                          [](T* p) { p->Release(); });
     auto holder = std::unique_ptr<Holder>(new H(p));
-    holders_map_.insert(std::make_pair((void*)p.get(), holder.get()));
     holders_.push_back(std::move(holder));
     return p;
   }
 
-  template <class T>
   struct NotifyData : Handler {
     ClientManager* cm;
     grpc::Channel* channel;
     std::chrono::system_clock::time_point deadline;
-    void* p;
-    OnStateChangeFunc<T> on_notify;
+    grpc::CompletionQueue* cq;
+    OnStateChangeFunc on_notify;
     NotifyData(ClientManager* cm, grpc::Channel* channel,
-               std::chrono::system_clock::time_point deadline, void* p,
-               OnStateChangeFunc<T> on_notify)
+               std::chrono::system_clock::time_point deadline,
+               grpc::CompletionQueue* cq, OnStateChangeFunc on_notify)
         : cm(cm),
           channel(channel),
           deadline(deadline),
-          p(p),
+          cq(cq),
           on_notify(std::move(on_notify)) {}
-    void Proceed(bool ok) override { cm->ProceedToNotify<T>(ok, this); }
+    void Proceed(bool ok) override { cm->ProceedToNotify(ok, this); }
   };
 
-  template <class T>
-  void ProceedToNotify(bool ok, NotifyData<T>* p) {
-    std::lock_guard<std::mutex> guard(mutex_);
+  void ProceedToNotify(bool ok, NotifyData* p) {
+    std::unique_lock<std::mutex> lock(mutex_);
+
+    SPDLOG_TRACE("ProceedToNotify: ok={}", ok);
 
     struct SafeDelete {
-      NotifyData<T>* p;
+      NotifyData* p;
       ~SafeDelete() { delete p; }
     } safe_delete = {p};
 
-    auto it = holders_map_.find(p->p);
-    if (it == holders_map_.end()) {
+    if (shutdown_) {
       return;
     }
-    auto sp = std::static_pointer_cast<T>(it->second->Lock());
-    if (sp == nullptr) {
-      return;
-    }
+
+    lock.unlock();
     bool repeated = false;
-    p->on_notify(p->channel, p->deadline, sp, repeated);
+    try {
+      p->on_notify(p->channel, ok, p->deadline, repeated);
+    } catch (std::exception& e) {
+      SPDLOG_ERROR("OnStateChange error: what={}", e.what());
+    } catch (...) {
+      SPDLOG_ERROR("OnStateChange error");
+    }
+    lock.lock();
+    if (shutdown_) {
+      return;
+    }
     if (repeated) {
-      auto client_id = next_client_id_++;
-      auto cq = &threads_[client_id % threads_.size()].cq;
       p->channel->NotifyOnStateChange(p->channel->GetState(false), p->deadline,
-                                      cq, p);
+                                      p->cq, p);
       safe_delete.p = nullptr;
     }
   }
