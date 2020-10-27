@@ -11,6 +11,8 @@
 
 ## master
 
+## 0.5.4 (2020-10-28)
+
 - [CHANGE] やっぱりタイムアウトは不要だったので削除
 - [CHANGE] `ClientManager::NotifyOnStateChange` をクライアントに紐付けるのをやめる
 - [ADD] 各クライアントに `Cancel` 関数を追加
