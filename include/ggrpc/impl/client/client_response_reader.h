@@ -23,7 +23,7 @@ class ClientManager;
 
 enum class ClientResponseReaderError {
   FINISH,
-  TIMEOUT,
+  CANCEL,
 };
 
 template <class W, class R>
@@ -50,6 +50,8 @@ class ClientResponseReader {
   bool release_ = false;
   int nesting_ = 0;
   std::mutex mutex_;
+
+  bool need_callback_ = false;
 
   grpc::CompletionQueue* cq_;
 
@@ -126,7 +128,7 @@ class ClientResponseReader {
 
     release_ = true;
 
-    DoClose(d.lock);
+    DoClose(d.lock, false);
   }
   friend class ClientManager;
 
@@ -134,14 +136,21 @@ class ClientResponseReader {
   void Close() {
     SafeDeleter d(this);
 
-    DoClose(d.lock);
+    DoClose(d.lock, false);
+  }
+
+  void Cancel() {
+    SafeDeleter d(this);
+
+    DoClose(d.lock, true);
   }
 
  private:
-  void DoClose(std::unique_lock<std::mutex>& lock) {
+  void DoClose(std::unique_lock<std::mutex>& lock, bool need_callback) {
     if (status_ == Status::CONNECTING) {
       context_.TryCancel();
       status_ = Status::CANCELING;
+      need_callback_ = need_callback;
       return;
     }
 
@@ -193,6 +202,13 @@ class ClientResponseReader {
 
     auto st = status_;
     status_ = Status::DONE;
+
+    if (st == Status::CANCELING && need_callback_) {
+      RunCallback(d.lock, "OnError_Cancel", on_error_,
+                  ClientResponseReaderError::CANCEL);
+      Done(d.lock);
+      return;
+    }
 
     if (!ok) {
       SPDLOG_ERROR("finishing error");

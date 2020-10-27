@@ -660,11 +660,11 @@ void test_client_timeout() {
 void test_client_notify() {
   auto channel = grpc::CreateChannel("localhost:50051",
                                      grpc::InsecureChannelCredentials());
-  TestClientManager cm(channel, 1);
+  TestClientManager cm(channel, 10);
   cm.Start();
 
   TestServer server;
-  server.Start("localhost:50051", 1);
+  server.Start("localhost:50051", 10);
   std::this_thread::sleep_for(std::chrono::seconds(2));
 
   gg::UnaryRequest req;
@@ -729,6 +729,104 @@ void test_client_notify() {
   }
 }
 
+void test_client_cancel() {
+  auto channel = grpc::CreateChannel("localhost:50051",
+                                     grpc::InsecureChannelCredentials());
+  TestClientManager cm(channel, 10);
+  cm.Start();
+
+  TestServer server;
+  server.Start("localhost:50051", 10);
+  std::this_thread::sleep_for(std::chrono::seconds(2));
+
+  std::atomic<int> n = 0;
+
+  {
+    gg::UnaryRequest req;
+    n = 0;
+    auto unary = cm.CreateUnary();
+
+    unary->SetOnFinish([unary](gg::UnaryResponse resp, grpc::Status status) {
+      ASSERT(false);
+    });
+    unary->SetOnError([&n, unary](ggrpc::ClientResponseReaderError error) {
+      ASSERT(error == ggrpc::ClientResponseReaderError::CANCEL);
+      n = 1;
+    });
+    unary->Connect(std::move(req));
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    unary->Cancel();
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    ASSERT(n == 1);
+  }
+
+  {
+    gg::SstreamRequest req;
+    n = 0;
+    auto ss = cm.CreateSstream();
+
+    ss->SetOnRead([](gg::SstreamResponse resp) { ASSERT(false); });
+    ss->SetOnFinish([](grpc::Status status) { ASSERT(false); });
+    ss->SetOnError([&n, ss](ggrpc::ClientReaderError error) {
+      ASSERT(error == ggrpc::ClientReaderError::CONNECT_CANCEL);
+      n = 1;
+    });
+    ss->Connect(std::move(req));
+    ss->Cancel();
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    ASSERT(n == 1);
+
+    n = 0;
+    ss = cm.CreateSstream();
+
+    ss->SetOnRead([](gg::SstreamResponse resp) { ASSERT(false); });
+    ss->SetOnFinish([](grpc::Status status) { ASSERT(false); });
+    ss->SetOnError([&n, ss](ggrpc::ClientReaderError error) {
+      ASSERT(error == ggrpc::ClientReaderError::READ_CANCEL);
+      n = 1;
+    });
+    ss->Connect(std::move(req));
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    ss->Cancel();
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    ASSERT(n == 1);
+  }
+
+  {
+    gg::CstreamRequest req;
+    n = 0;
+    auto cs = cm.CreateCstream();
+
+    cs->SetOnFinish(
+        [](gg::CstreamResponse resp, grpc::Status status) { ASSERT(false); });
+    cs->SetOnError([&n, cs](ggrpc::ClientWriterError error) {
+      ASSERT(error == ggrpc::ClientWriterError::CONNECT_CANCEL);
+      n = 1;
+    });
+    cs->Connect();
+    cs->Cancel();
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    ASSERT(n == 1);
+  }
+
+  {
+    n = 0;
+    auto ss = cm.CreateBidi();
+    gg::BidiRequest req;
+
+    ss->SetOnRead([](gg::BidiResponse resp) { ASSERT(false); });
+    ss->SetOnFinish([](grpc::Status status) { ASSERT(false); });
+    ss->SetOnError([&n, ss](ggrpc::ClientReaderWriterError error) {
+      ASSERT(error == ggrpc::ClientReaderWriterError::CONNECT_CANCEL);
+      n = 1;
+    });
+    ss->Connect();
+    ss->Cancel();
+    std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    ASSERT(n == 1);
+  }
+}
+
 int main() {
   spdlog::set_level(spdlog::level::trace);
 
@@ -742,4 +840,5 @@ int main() {
   test_client_generic();
   test_client_timeout();
   test_client_notify();
+  test_client_cancel();
 }

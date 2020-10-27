@@ -24,6 +24,8 @@ class ClientManager;
 enum class ClientReaderError {
   CONNECT,
   READ,
+  CONNECT_CANCEL,
+  READ_CANCEL,
 };
 
 template <class W, class R>
@@ -63,6 +65,8 @@ class ClientReader {
   bool release_ = false;
   int nesting_ = 0;
   std::mutex mutex_;
+
+  bool need_callback_ = false;
 
   grpc::CompletionQueue* cq_;
   ConnectFunc connect_;
@@ -150,7 +154,7 @@ class ClientReader {
 
     release_ = true;
 
-    DoClose(d.lock);
+    DoClose(d.lock, false);
   }
   friend class ClientManager;
 
@@ -158,15 +162,22 @@ class ClientReader {
   void Close() {
     SafeDeleter d(this);
 
-    DoClose(d.lock);
+    DoClose(d.lock, false);
+  }
+
+  void Cancel() {
+    SafeDeleter d(this);
+
+    DoClose(d.lock, true);
   }
 
  private:
-  void DoClose(std::unique_lock<std::mutex>& lock) {
+  void DoClose(std::unique_lock<std::mutex>& lock, bool need_callback) {
     // 読み込み中だったらキャンセルされるまで待つ
     if (read_status_ == ReadStatus::CONNECTING ||
         read_status_ == ReadStatus::READING ||
         read_status_ == ReadStatus::FINISHING) {
+      need_callback_ = need_callback;
       context_.TryCancel();
     }
     if (read_status_ == ReadStatus::CONNECTING ||
@@ -220,8 +231,13 @@ class ClientReader {
     assert(read_status_ == ReadStatus::CONNECTING ||
            read_status_ == ReadStatus::CANCELING);
 
-    if (read_status_ != ReadStatus::CONNECTING) {
+    if (read_status_ == ReadStatus::CANCELING) {
       // 既に Close が呼ばれてるので終わる
+      read_status_ = ReadStatus::FINISHED;
+      if (need_callback_) {
+        RunCallback(d.lock, "OnError_ConnectCancel", on_error_,
+                    ClientReaderError::CONNECT_CANCEL);
+      }
       Done(d.lock);
       return;
     }
@@ -253,6 +269,10 @@ class ClientReader {
 
     if (read_status_ == ReadStatus::CANCELING) {
       read_status_ = ReadStatus::FINISHED;
+      if (need_callback_) {
+        RunCallback(d.lock, "OnError_ReadCancel", on_error_,
+                    ClientReaderError::READ_CANCEL);
+      }
       Done(d.lock);
       return;
     }

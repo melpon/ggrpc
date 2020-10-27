@@ -26,6 +26,9 @@ enum class ClientWriterError {
   CONNECT,
   READ,
   WRITE,
+  CONNECT_CANCEL,
+  READ_CANCEL,
+  WRITE_CANCEL,
 };
 
 template <class W, class R>
@@ -82,6 +85,8 @@ class ClientWriter {
   bool release_ = false;
   int nesting_ = 0;
   std::mutex mutex_;
+
+  bool need_callback_ = false;
 
   grpc::CompletionQueue* cq_;
   ConnectFunc connect_;
@@ -186,7 +191,7 @@ class ClientWriter {
 
     release_ = true;
 
-    DoClose(d.lock);
+    DoClose(d.lock, false);
   }
   friend class ClientManager;
 
@@ -194,17 +199,24 @@ class ClientWriter {
   void Close() {
     SafeDeleter d(this);
 
-    DoClose(d.lock);
+    DoClose(d.lock, false);
+  }
+
+  void Cancel() {
+    SafeDeleter d(this);
+
+    DoClose(d.lock, true);
   }
 
  private:
-  void DoClose(std::unique_lock<std::mutex>& lock) {
+  void DoClose(std::unique_lock<std::mutex>& lock, bool need_callback) {
     // 読み書き中だったらキャンセルされるまで待つ
     if (read_status_ == ReadStatus::CONNECTING ||
         read_status_ == ReadStatus::FINISHING ||
         write_status_ == WriteStatus::CONNECTING ||
         write_status_ == WriteStatus::WRITING ||
         write_status_ == WriteStatus::FINISHING) {
+      need_callback_ = need_callback;
       context_.TryCancel();
     }
     if (read_status_ == ReadStatus::CONNECTING ||
@@ -318,6 +330,10 @@ class ClientWriter {
       // 既に Close が呼ばれてるので終わる
       read_status_ = ReadStatus::FINISHED;
       write_status_ = WriteStatus::FINISHED;
+      if (need_callback_) {
+        RunCallback(d.lock, "OnError_ConnectCancel", on_error_,
+                    ClientWriterError::CONNECT_CANCEL);
+      }
       Done(d.lock);
       return;
     }
@@ -350,6 +366,10 @@ class ClientWriter {
 
     if (read_status_ == ReadStatus::CANCELING) {
       read_status_ = ReadStatus::FINISHED;
+      if (need_callback_) {
+        RunCallback(d.lock, "OnError_ReadCancel", on_error_,
+                    ClientWriterError::READ_CANCEL);
+      }
       Done(d.lock);
       return;
     }
@@ -394,6 +414,10 @@ class ClientWriter {
 
     if (write_status_ == WriteStatus::CANCELING) {
       write_status_ = WriteStatus::FINISHED;
+      if (need_callback_) {
+        RunCallback(d.lock, "OnError_WriteCancel", on_error_,
+                    ClientWriterError::WRITE_CANCEL);
+      }
       Done(d.lock);
       return;
     }
