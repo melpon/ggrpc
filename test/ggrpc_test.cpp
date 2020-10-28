@@ -166,6 +166,12 @@ typedef ggrpc::ClientReaderWriter<gg::BidiRequest, gg::BidiResponse> BidiClient;
 
 typedef ggrpc::ClientResponseReader<grpc::ByteBuffer, grpc::ByteBuffer>
     UnaryClientGeneric;
+typedef ggrpc::ClientReader<grpc::ByteBuffer, grpc::ByteBuffer>
+    SstreamClientGeneric;
+typedef ggrpc::ClientWriter<grpc::ByteBuffer, grpc::ByteBuffer>
+    CstreamClientGeneric;
+typedef ggrpc::ClientReaderWriter<grpc::ByteBuffer, grpc::ByteBuffer>
+    BidiClientGeneric;
 
 class TestClientManager {
   ggrpc::ClientManager cm_;
@@ -230,6 +236,25 @@ class TestClientManager {
                              grpc::CompletionQueue* cq, void* tag) {
           return stub->AsyncBidi(context, cq, tag);
         });
+  }
+
+  void TestCompileGeneric() {
+    auto unary = cm_.CreateResponseReader<grpc::ByteBuffer, grpc::ByteBuffer>(
+        [](grpc::ClientContext* context, const grpc::ByteBuffer& request,
+           grpc::CompletionQueue* cq) { return nullptr; });
+    auto ss = cm_.CreateReader<grpc::ByteBuffer, grpc::ByteBuffer>(
+        [](grpc::ClientContext* context, const grpc::ByteBuffer& request,
+           grpc::CompletionQueue* cq, void* tag) { return nullptr; });
+    auto cs = cm_.CreateWriter<grpc::ByteBuffer, grpc::ByteBuffer>(
+        [](grpc::ClientContext* context, grpc::ByteBuffer* response,
+           grpc::CompletionQueue* cq, void* tag) { return nullptr; });
+    auto bidi = cm_.CreateReaderWriter<grpc::ByteBuffer, grpc::ByteBuffer>(
+        [](grpc::ClientContext* context, grpc::CompletionQueue* cq, void* tag) {
+          return nullptr;
+        });
+    grpc::ByteBuffer req;
+    cs->Write(req);
+    bidi->Write(req);
   }
 };
 

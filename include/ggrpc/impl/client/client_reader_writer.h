@@ -12,6 +12,9 @@
 #include <grpcpp/support/async_stream.h>
 #include <grpcpp/support/async_unary_call.h>
 
+// protobuf
+#include <google/protobuf/message.h>
+
 // spdlog
 #include <spdlog/spdlog.h>
 
@@ -296,11 +299,16 @@ class ClientReaderWriter {
     --nesting_;
   }
 
+  std::string DebugString(const google::protobuf::Message* message) {
+    return message->DebugString();
+  }
+  std::string DebugString(const void*) { return ""; }
+
  public:
   void Write(W request, int64_t id = 0) {
     std::lock_guard<std::mutex> guard(mutex_);
     SPDLOG_TRACE("[0x{}] Write: request={}", (void*)this,
-                 request.DebugString());
+                 DebugString(&request));
 
     if (write_status_ == WriteStatus::IDLE ||
         write_status_ == WriteStatus::INIT ||

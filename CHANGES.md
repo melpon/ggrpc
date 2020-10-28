@@ -11,6 +11,8 @@
 
 ## master
 
+- [FIX] `grpc::ByteBuffer` を Write できない問題を修正
+
 ## 0.5.4 (2020-10-28)
 
 - [CHANGE] やっぱりタイムアウトは不要だったので削除
