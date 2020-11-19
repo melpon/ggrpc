@@ -349,6 +349,9 @@ class ServerResponseWriterContext {
 template <class W, class R>
 class ServerResponseWriterHandler {
  public:
+  grpc::ServerContext* GetGrpcContext();
+  const grpc::ServerContext* GetGrpcContext() const;
+
   std::shared_ptr<ServerResponseWriterContext<W, R>> Context() const;
 
   virtual void Request(grpc::ServerContext* context, R* request,
@@ -376,6 +379,9 @@ class ServerWriterContext {
 template <class W, class R>
 class ServerWriterHandler {
  public:
+  grpc::ServerContext* GetGrpcContext();
+  const grpc::ServerContext* GetGrpcContext() const;
+
   std::shared_ptr<ServerWriterContext<W, R>> Context() const;
 
   virtual void Request(grpc::ServerContext* context, R* request,
@@ -404,6 +410,9 @@ class ServerReaderContext {
 template <class W, class R>
 class ServerReaderHandler {
  public:
+  grpc::ServerContext* GetGrpcContext();
+  const grpc::ServerContext* GetGrpcContext() const;
+
   std::shared_ptr<ServerReaderContext<W, R>> Context() const;
 
   virtual void Request(grpc::ServerContext* context,
@@ -433,6 +442,9 @@ class ServerReaderWriterContext {
 template <class W, class R>
 class ServerReaderWriterHandler {
  public:
+  grpc::ServerContext* GetGrpcContext();
+  const grpc::ServerContext* GetGrpcContext() const;
+
   std::shared_ptr<ServerReaderWriterContext<W, R>> Context() const;
 
   virtual void Request(grpc::ServerContext* context,

@@ -129,6 +129,10 @@ class ServerReaderWriterHandler {
     SPDLOG_TRACE("[0x{}] deleted ServerReaderWriterHandler", (void*)this);
   }
 
+  // コールバック呼び出し中のみ利用可能
+  grpc::ServerContext* GetGrpcContext() { return &server_context_; }
+  const grpc::ServerContext* GetGrpcContext() const { return &server_context_; }
+
  private:
   // ServerResponseWriterContext への参照が消えると自身の Release() が呼ばれるように仕込む
   // Close() や Finish() を呼ぶと自身の持つ context は nullptr になる

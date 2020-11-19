@@ -34,6 +34,11 @@ class TestUnaryHandler
   void OnAccept(gg::UnaryRequest request) override {
     SPDLOG_TRACE("received UnaryRequest: {}", request.DebugString());
     std::this_thread::sleep_for(std::chrono::seconds(1));
+    for (const auto& pair : GetGrpcContext()->client_metadata()) {
+      GetGrpcContext()->AddInitialMetadata(
+          std::string(pair.first.begin(), pair.first.end()),
+          std::string(pair.second.begin(), pair.second.end()));
+    }
     gg::UnaryResponse resp;
     resp.set_value(request.value() * 100);
     Context()->Finish(resp, grpc::Status::OK);
@@ -185,11 +190,15 @@ class TestClientManager {
 
   ggrpc::ClientManager* ClientManager() { return &cm_; }
 
-  std::shared_ptr<UnaryClient> CreateUnary(int milliseconds = 0) {
+  std::shared_ptr<UnaryClient> CreateUnary(
+      int milliseconds = 0, std::map<std::string, std::string> meta = {}) {
     return cm_.CreateResponseReader<gg::UnaryRequest, gg::UnaryResponse>(
-        [stub = stub_.get(), milliseconds](grpc::ClientContext* context,
-                                           const gg::UnaryRequest& request,
-                                           grpc::CompletionQueue* cq) {
+        [stub = stub_.get(), milliseconds, meta = std::move(meta)](
+            grpc::ClientContext* context, const gg::UnaryRequest& request,
+            grpc::CompletionQueue* cq) {
+          for (const auto& p : meta) {
+            context->AddMetadata(p.first, p.second);
+          }
           if (milliseconds != 0) {
             context->set_deadline(std::chrono::system_clock::now() +
                                   std::chrono::milliseconds(milliseconds));
@@ -852,6 +861,40 @@ void test_client_cancel() {
   }
 }
 
+void test_metadata() {
+  auto channel = grpc::CreateChannel("localhost:50051",
+                                     grpc::InsecureChannelCredentials());
+  TestClientManager cm(channel, 10);
+  cm.Start();
+
+  TestServer server;
+  server.Start("localhost:50051", 10);
+  std::this_thread::sleep_for(std::chrono::seconds(2));
+
+  {
+    gg::UnaryRequest req;
+    auto unary = cm.CreateUnary(0, {{"hoge", "fuga"}, {"foo", "bar"}});
+
+    unary->SetOnFinish([unary](gg::UnaryResponse resp, grpc::Status status) {
+      const auto& meta = unary->GetGrpcContext()->GetServerInitialMetadata();
+      SPDLOG_INFO("metasize={}", meta.size());
+      for (const auto& p : meta) {
+        SPDLOG_INFO("{}={}", std::string(p.first.begin(), p.first.end()),
+                    std::string(p.second.begin(), p.second.end()));
+      }
+      ASSERT(meta.size() == 3);
+      ASSERT(meta.find("hoge") != meta.end());
+      ASSERT(meta.find("hoge")->second == "fuga");
+      ASSERT(meta.find("foo") != meta.end());
+      ASSERT(meta.find("foo")->second == "bar");
+      // user-agent=grpc-c++/1.33.1 grpc-c/13.0.0 (osx; chttp2)
+      ASSERT(meta.find("user-agent") != meta.end());
+    });
+    unary->Connect(std::move(req));
+    std::this_thread::sleep_for(std::chrono::milliseconds(2000));
+  }
+}
+
 int main() {
   spdlog::set_level(spdlog::level::trace);
 
@@ -866,4 +909,5 @@ int main() {
   test_client_timeout();
   test_client_notify();
   test_client_cancel();
+  test_metadata();
 }
