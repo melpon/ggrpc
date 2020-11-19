@@ -11,6 +11,10 @@
 
 ## master
 
+## 0.5.6 (2020-11-19)
+
+- [ADD] `grpc::ServerContext` を取得する関数を追加
+
 ## 0.5.5 (2020-10-29)
 
 - [FIX] `grpc::ByteBuffer` を Write できない問題を修正
