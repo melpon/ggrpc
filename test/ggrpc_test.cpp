@@ -910,4 +910,5 @@ int main() {
   test_client_notify();
   test_client_cancel();
   test_metadata();
+  std::cout << "Test is passed" << std::endl;
 }

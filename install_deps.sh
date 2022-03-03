@@ -10,28 +10,28 @@ mkdir -p $SOURCE_DIR
 mkdir -p $BUILD_DIR
 mkdir -p $INSTALL_DIR
 
-CMAKE_VERSION="3.16.2"
+CMAKE_VERSION="3.22.2"
 CMAKE_VERSION_FILE="$INSTALL_DIR/cmake.version"
 CMAKE_CHANGED=0
 if [ ! -e $CMAKE_VERSION_FILE -o "$CMAKE_VERSION" != "`cat $CMAKE_VERSION_FILE`" ]; then
   CMAKE_CHANGED=1
 fi
 
-GRPC_VERSION="1.33.1"
+GRPC_VERSION="1.44.0"
 GRPC_VERSION_FILE="$INSTALL_DIR/grpc.version"
 GRPC_CHANGED=0
 if [ ! -e $GRPC_VERSION_FILE -o "$GRPC_VERSION" != "`cat $GRPC_VERSION_FILE`" ]; then
   GRPC_CHANGED=1
 fi
 
-CLI11_VERSION="1.8.0"
+CLI11_VERSION="2.1.2"
 CLI11_VERSION_FILE="$INSTALL_DIR/cli11.version"
 CLI11_CHANGED=0
 if [ ! -e $CLI11_VERSION_FILE -o "$CLI11_VERSION" != "`cat $CLI11_VERSION_FILE`" ]; then
   CLI11_CHANGED=1
 fi
 
-SPDLOG_VERSION="1.8.1"
+SPDLOG_VERSION="1.9.2"
 SPDLOG_VERSION_FILE="$INSTALL_DIR/spdlog.version"
 SPDLOG_CHANGED=0
 if [ ! -e $SPDLOG_VERSION_FILE -o "$SPDLOG_VERSION" != "`cat $SPDLOG_VERSION_FILE`" ]; then
@@ -55,14 +55,14 @@ fi
 # CMake が古いとビルド出来ないので、CMake のバイナリをダウンロードする
 if [ $CMAKE_CHANGED -eq 1 -o ! -e $INSTALL_DIR/cmake/bin/cmake ]; then
   if [ "`uname`" = "Darwin" ]; then
-    _URL=https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-Darwin-x86_64.tar.gz
-    _FILE=$SOURCE_DIR/cmake-${CMAKE_VERSION}-Darwin-x86_64.tar.gz
-    _DIR=cmake-${CMAKE_VERSION}-Darwin-x86_64
+    _URL=https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-macos-universal.tar.gz
+    _FILE=$SOURCE_DIR/cmake-${CMAKE_VERSION}-macos-universal.tar.gz
+    _DIR=cmake-${CMAKE_VERSION}-macos-universal
     _INSTALL=$INSTALL_DIR/CMake.app
   else
-    _URL=https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-Linux-x86_64.tar.gz
-    _FILE=$SOURCE_DIR/cmake-${CMAKE_VERSION}-Linux-x86_64.tar.gz
-    _DIR=cmake-${CMAKE_VERSION}-Linux-x86_64
+    _URL=https://github.com/Kitware/CMake/releases/download/v${CMAKE_VERSION}/cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz
+    _FILE=$SOURCE_DIR/cmake-${CMAKE_VERSION}-linux-x86_64.tar.gz
+    _DIR=cmake-${CMAKE_VERSION}-linux-x86_64
     _INSTALL=$INSTALL_DIR/cmake
   fi
   if [ ! -e $_FILE ]; then
