@@ -22,6 +22,7 @@ project(ggrpc C CXX)
 
 find_package(Protobuf REQUIRED)
 find_package(gRPC REQUIRED)
+find_package(utf8_range REQUIRED)
 find_package(CLI11 REQUIRED)
 find_package(Spdlog REQUIRED)
 
@@ -71,4 +72,9 @@ target_include_directories(ggrpc_test PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/inclu
 target_include_directories(ggrpc_test PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/proto")
 target_link_libraries(ggrpc_test
   gRPC::grpc++
+  protobuf::libprotobuf
+  gRPC::utf8_range_lib
+  utf8_range::utf8_validity
+  absl::cord
+  absl::cord_internal
   Spdlog::Spdlog)

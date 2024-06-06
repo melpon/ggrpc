@@ -394,7 +394,7 @@ class ClientWriter {
       SPDLOG_DEBUG("gRPC Read finished");
     } else {
       SPDLOG_ERROR("gRPC error: {} ({})", grpc_status_.error_message(),
-                   grpc_status_.error_code());
+                   (int)grpc_status_.error_code());
       SPDLOG_ERROR("   details: {}", grpc_status_.error_details());
     }
     read_status_ = ReadStatus::FINISHED;
